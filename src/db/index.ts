@@ -2,10 +2,16 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { env } from "../config/env";
 
+import * as schema from "./schema";
+
 const pool = new Pool({
   connectionString: env.DATABASE_URL,
 });
-export const db = drizzle({ client: pool,casing: 'snake_case' });
- 
-const result = await db.execute('select 1');
-console.log(result)
+
+export const db = drizzle({
+  client: pool,
+  schema,
+  casing: "snake_case",
+});
+
+export type DB = typeof db;

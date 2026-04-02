@@ -1,0 +1,982 @@
+/**
+ * modules/auth/auth.routes.ts
+ *
+ * Public vs Protected split:
+ *
+ * PUBLIC  — no JWT required, anyone can call
+ *   /auth/otp/send
+ *   /auth/otp/verify
+ *   /auth/register
+ *   /auth/login/pin
+ *   /auth/login/otp
+ *   /auth/token/refresh
+ *   /pin/reset/request
+ *   /pin/reset/confirm
+ *
+ * PROTECTED — valid JWT + active session required
+ *   /auth/logout
+ *   /auth/logout/all
+ *   /otp/request
+ *   /otp/verify
+ *   /pin/set
+ *   /users/*
+ *   /2fa/*
+ *   /sessions/*
+ *   /devices/*
+ *   /referrals/*
+ *   /roles/*
+ *   /audit/*
+ *
+ * Layer rule:
+ *   Routes   → extract HTTP inputs (body, params, headers, ip, userAgent)
+ *              then delegate to the controller immediately.
+ *   Controller → validation/reshaping not covered by TypeBox,
+ *               service orchestration, response shaping.
+ *   Service  → business logic, DB access.
+ *
+ * Routes MUST NOT import from auth.service directly.
+ */
+
+import { UAParser } from "ua-parser-js";
+
+import { Elysia, t } from "elysia";
+
+import { jwtAuthPlugin } from "../../middleware/auth.middleware";
+
+import {
+  AuthController,
+  AuditController,
+  DeviceController,
+  OtpController,
+  PinController,
+  ReferralController,
+  RoleController,
+  SessionController,
+  TwoFactorController,
+  UserController,
+} from "./auth.controller";
+
+import type { AuthUser } from "../../middleware/auth.middleware";
+import { rateLimit } from "../../middleware/rateLimit.middleware";
+import { env } from "../../config/env";
+import { AuthErrors } from "./auth.errors";
+
+// ── Rate limit windows ────────────────────────────────────────────────────────
+
+const RL_WINDOW = env.RATE_LIMIT_WINDOW_MIN * 60;
+const RL_OTP_WINDOW = env.RATE_LIMIT_OTP_WINDOW_SEC;
+const RL_COOLDOWN = env.RATE_LIMIT_COOLDOWN_SEC;
+
+// ── Shared TypeBox primitives ─────────────────────────────────────────────────
+
+const E164Phone = t.String({
+  pattern: "^(\\+[1-9]\\d{6,14}|\\d{10,12})$",
+  description: "E.164 phone number (or 10-12 digit input)",
+});
+
+const UUIDParam = t.Object({ id: t.String({ format: "uuid" }) });
+
+const PaginationQuery = t.Object({
+  page: t.Optional(t.Numeric({ minimum: 1, default: 1 })),
+  limit: t.Optional(t.Numeric({ minimum: 1, maximum: 100, default: 20 })),
+  order: t.Optional(t.Union([t.Literal("asc"), t.Literal("desc")])),
+  cursor: t.Optional(t.String()),
+});
+
+function parsePagination(query: typeof PaginationQuery.static) {
+  return {
+    page: query.page ?? 1,
+    limit: query.limit ?? 20,
+    order: (query.order ?? "desc") as "asc" | "desc",
+    cursor: query.cursor,
+  };
+}
+
+// ── Auth bodies ───────────────────────────────────────────────────────────────
+
+const SendOtpBody = t.Object({ phone: E164Phone });
+
+const VerifyOtpBody = t.Object({
+  phone: E164Phone,
+  otp: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
+});
+
+const RegisterBody = t.Object({
+  otpToken: t.String({ minLength: 32, description: "From /auth/otp/verify" }),
+  name: t.String({ minLength: 1, maxLength: 255 }),
+  referralCode: t.Optional(
+    t.String({ minLength: 3, maxLength: 20, pattern: "^[A-Z0-9]+$" }),
+  ),
+});
+
+const LoginWithPinBody = t.Object({
+  phone: E164Phone,
+  pin: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
+});
+
+const LoginWithOtpTokenBody = t.Object({
+  otpToken: t.String({ minLength: 32, description: "From /auth/otp/verify" }),
+});
+
+const SignOutBody = t.Object({ sessionId: t.String({ format: "uuid" }) });
+
+// ── OTP bodies ────────────────────────────────────────────────────────────────
+
+const OtpPurpose = t.Union([
+  t.Literal("phone_verification"),
+  t.Literal("pin_reset"),
+  t.Literal("enable_2fa"),
+  t.Literal("disable_2fa"),
+  t.Literal("account_deletion"),
+]);
+
+const OtpRequestBody = t.Object({
+  purpose: OtpPurpose,
+  phone: t.Optional(E164Phone),
+  email: t.Optional(t.String({ format: "email" })),
+});
+
+const OtpVerifyBody = t.Object({
+  purpose: OtpPurpose,
+  otp: t.String({ minLength: 4, maxLength: 8, pattern: "^\\d+$" }),
+  phone: t.Optional(E164Phone),
+  email: t.Optional(t.String({ format: "email" })),
+});
+
+// ── PIN bodies ────────────────────────────────────────────────────────────────
+
+const SetPinBody = t.Object({
+  pin: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
+  confirmPin: t.String({ minLength: 6, maxLength: 6 }),
+});
+
+const PinResetRequestBody = t.Object({ phone: E164Phone });
+
+const PinResetConfirmBody = t.Object({
+  otpToken: t.String({ minLength: 32 }),
+  newPin: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
+  confirmPin: t.String({ minLength: 6, maxLength: 6 }),
+});
+
+// ── User / profile bodies ─────────────────────────────────────────────────────
+
+const UpdateProfileBody = t.Object({
+  name: t.Optional(t.String({ minLength: 1, maxLength: 255 })),
+  email: t.Optional(t.String({ format: "email" })),
+});
+
+// ── 2FA bodies ────────────────────────────────────────────────────────────────
+
+const TwoFactorVerifyBody = t.Object({
+  totp: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
+});
+
+// ── Role bodies ───────────────────────────────────────────────────────────────
+
+const CreateRoleBody = t.Object({
+  name: t.String({ minLength: 1, maxLength: 255 }),
+  slug: t.String({ minLength: 1, maxLength: 100, pattern: "^[a-z0-9-]+$" }),
+  description: t.Optional(t.String({ maxLength: 1000 })),
+});
+
+const RoleParams = t.Object({ roleId: t.String({ format: "uuid" }) });
+
+const RoleUserParams = t.Object({
+  roleId: t.String({ format: "uuid" }),
+  userId: t.String({ format: "uuid" }),
+});
+
+// ── Device / audit ────────────────────────────────────────────────────────────
+
+const SetTrustedBody = t.Object({ trusted: t.Boolean() });
+
+const ResourceAuditParams = t.Object({
+  resource: t.String(),
+  resourceId: t.String({ format: "uuid" }),
+});
+
+// ── resolveRequestContext ─────────────────────────────────────────────────────
+// Extracts ip, userAgent, and deviceInfo from the raw request.
+// These are HTTP-layer concerns — they belong here, not in the controller.
+
+type DeviceInfo = {
+  browser: string;
+  browserVersion: string;
+  os: string;
+  deviceType: string;
+  userAgent: string;
+  ip: string;
+};
+
+type RequestContext = {
+  ip: string;
+  userAgent: string;
+  deviceInfo: DeviceInfo;
+};
+
+function resolveRequestContext({
+  request,
+  server,
+}: {
+  request: Request;
+  server: { requestIP(req: Request): { address: string } | null } | null;
+}): RequestContext {
+  let ip = server?.requestIP(request)?.address ?? "unknown";
+
+  // FIX: Secure IP extraction. If behind a proxy, we trust the X-Forwarded-For
+  // header only if TRUST_PROXY is enabled. Production environments should
+  // ensure the edge proxy strips any incoming X-Forwarded-For headers from clients.
+  if (env.TRUST_PROXY) {
+    const forwardedFor = request.headers.get("x-forwarded-for");
+    if (forwardedFor) {
+      ip = forwardedFor.split(",")[0].trim();
+    }
+  }
+
+  const userAgent = request.headers.get("user-agent") ?? "";
+  const fingerprint = request.headers.get("x-device-fingerprint") ?? "unknown";
+  const parseResult = new UAParser(userAgent).getResult();
+
+  const deviceInfo = {
+    browser: parseResult.browser.name || "Unknown",
+    browserVersion: parseResult.browser.version || "Unknown",
+    os: parseResult.os.name || "Unknown",
+    deviceType: parseResult.device.type || "desktop",
+    userAgent,
+    ip,
+    fingerprint,
+  };
+
+  return { ip, userAgent, deviceInfo };
+}
+
+// ── authenticate ──────────────────────────────────────────────────────────────
+// Promotes the optional ctx.user injected by jwtAuthPlugin into a guaranteed
+// actor value. Throws 401 early so route handlers can assume actor is present.
+
+function authenticate(ctx: { user?: AuthUser;[key: string]: unknown }): {
+  actor: AuthUser;
+} {
+  if (!ctx.user) throw AuthErrors.Common.unauthorized();
+  return { actor: ctx.user };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PUBLIC — no JWT needed
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── 1. Public auth routes ─────────────────────────────────────────────────────
+// These routes handle the initial authentication flow, including OTP delivery,
+// verification, and user registration or login. No JWT is required here.
+
+export const publicAuthRoutes = new Elysia({ prefix: "/auth", tags: ["Auth"] })
+  .derive(resolveRequestContext)
+
+  // Step 1: Send a 6-digit OTP to the user's phone number.
+  // Works for both new (registration) and existing (login) users.
+  .post("/otp/send", ({ body, ip }) => AuthController.sendOtp(body, { ip }), {
+    body: SendOtpBody,
+    detail: { summary: "Send OTP to phone — new and returning users" },
+    beforeHandle: [
+      // Layer 1: IP-based limit (prevent general infrastructure abuse)
+      rateLimit({
+        max: env.RATE_LIMIT_OTP_SEND_MAX,
+        windowSec: RL_OTP_WINDOW,
+        action: "otp:send:ip",
+      }),
+      // Layer 2: Phone-based limit (prevent targeted SMS spam / cost abuse)
+      rateLimit({
+        max: 5,
+        windowSec: RL_OTP_WINDOW, // 5 OTPs per 15-minute window per phone
+        action: "otp:send:phone",
+        key: ({ body }: { body?: { phone?: string } }) =>
+          body?.phone ?? "unknown",
+      }),
+      // Layer 3: Short cooldown (force a minimum gap between sends)
+      rateLimit({
+        max: 1,
+        windowSec: RL_COOLDOWN, // 1 request per cooldown window per phone
+        action: "otp:send:cooldown",
+        key: ({ body }: { body?: { phone?: string } }) =>
+          body?.phone ?? "unknown",
+      }),
+    ],
+  })
+
+  // Step 2: Verify the 6-digit OTP sent to the phone.
+  // If valid, returns an `otpToken` which is used in the next step (register/login).
+  .post(
+    "/otp/verify",
+    ({ body, ip }) => AuthController.verifyOtp(body, { ip }),
+    {
+      body: VerifyOtpBody,
+      detail: {
+        summary: "Verify phone OTP",
+        description:
+          "Returns { isRegistered, otpToken }. Use otpToken in /auth/register or /auth/login/otp.",
+      },
+      beforeHandle: [
+        // Layer 1: IP-based
+        rateLimit({
+          max: env.RATE_LIMIT_OTP_VERIFY_MAX,
+          windowSec: RL_WINDOW,
+          action: "otp:verify:ip",
+        }),
+        // Layer 2: Phone-based
+        rateLimit({
+          max: 6,
+          windowSec: RL_WINDOW,
+          action: "otp:verify:phone",
+          key: ({ body }: { body?: { phone?: string } }) =>
+            body?.phone ?? "unknown",
+        }),
+      ],
+    },
+  )
+
+  // Step 3a: Register a new account using the `otpToken` from Step 2.
+  // Requires a name and optional referral code. Returns access/refresh tokens.
+  .post(
+    "/register",
+    ({ body, ip, userAgent, deviceInfo }) =>
+      AuthController.register(body, { ip, userAgent, deviceInfo }),
+    {
+      body: RegisterBody,
+      detail: { summary: "Register a new user" },
+      beforeHandle: [
+        // IP cap: otpToken is single-use & short-lived but we still guard
+        // against bulk registration attempts from the same IP.
+        rateLimit({
+          max: 5,
+          windowSec: RL_WINDOW,
+          action: "register:ip",
+        }),
+      ],
+    },
+  )
+
+  // Alternative: Login using phone number and a pre-set 6-digit PIN.
+  // Fast-track login for returning users who have already set a PIN.
+  .post(
+    "/login/pin",
+    ({ body, ip, userAgent, deviceInfo }) =>
+      AuthController.loginWithPin(body, { ip, userAgent, deviceInfo }),
+    {
+      body: LoginWithPinBody,
+      detail: { summary: "Login with phone + PIN" },
+      beforeHandle: [
+        // Layer 1: IP-based
+        rateLimit({
+          max: env.RATE_LIMIT_LOGIN_PIN_MAX,
+          windowSec: RL_WINDOW,
+          action: "login:pin:ip",
+        }),
+        // Layer 2: Phone-based
+        rateLimit({
+          max: 5,
+          windowSec: RL_WINDOW,
+          action: "login:pin:phone",
+          key: ({ body }: { body?: { phone?: string } }) =>
+            body?.phone ?? "unknown",
+        }),
+      ],
+    },
+  )
+
+  // Step 3b: Login for existing users using the `otpToken` from Step 2.
+  // Used when a user doesn't want to use a PIN or hasn't set one yet.
+  .post(
+    "/login/otp",
+    ({ body, ip, userAgent, deviceInfo }) =>
+      AuthController.loginWithOtpToken(body, { ip, userAgent, deviceInfo }),
+    {
+      body: LoginWithOtpTokenBody,
+      detail: { summary: "Login via OTP token" },
+      beforeHandle: [
+        rateLimit({
+          max: env.RATE_LIMIT_LOGIN_OTP_MAX,
+          windowSec: RL_WINDOW,
+          action: "login:otp",
+        }),
+      ],
+    },
+  )
+
+  .post(
+    "/token/refresh",
+    ({ headers, ip }) =>
+      // Exchange a refresh token for a new access token.
+      // Expects the 'x-refresh-token' header.
+      AuthController.refresh(headers["x-refresh-token"], { ip }),
+    {
+      detail: { summary: "Rotate access token using x-refresh-token header" },
+      beforeHandle: [
+        // Prevent token farming from a single IP
+        rateLimit({
+          max: env.RATE_LIMIT_REFRESH_MAX,
+          windowSec: RL_WINDOW,
+          action: "token:refresh:ip",
+        }),
+      ],
+    },
+  );
+
+// ── 2. Public PIN routes ──────────────────────────────────────────────────────
+// Used for resetting a forgotten PIN via OTP verification.
+// These are public because the user is locked out and cannot provide a JWT.
+
+export const publicPinRoutes = new Elysia({ prefix: "/pin", tags: ["PIN"] })
+  .derive(resolveRequestContext)
+
+  .post(
+    "/reset/request",
+    ({ body, ip }) => PinController.resetRequest(body.phone, { ip }),
+    {
+      body: PinResetRequestBody,
+      detail: { summary: "Request PIN reset OTP" },
+      beforeHandle: [
+        // Layer 1: IP-based
+        rateLimit({
+          max: env.RATE_LIMIT_PIN_RESET_MAX,
+          windowSec: RL_WINDOW,
+          action: "pin:reset:ip",
+        }),
+        // Layer 2: Phone-based
+        rateLimit({
+          max: 3,
+          windowSec: RL_WINDOW,
+          action: "pin:reset:phone",
+          key: ({ body }: { body?: { phone?: string } }) =>
+            body?.phone ?? "unknown",
+        }),
+      ],
+    },
+  )
+
+  .post(
+    "/reset/confirm",
+    ({ body, ip }) => PinController.resetConfirm(body, { ip }),
+    {
+      body: PinResetConfirmBody,
+      detail: { summary: "Confirm PIN reset with OTP token and new PIN" },
+    },
+  );
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PROTECTED — JWT required
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── 3. Protected auth routes ──────────────────────────────────────────────────
+// These routes require a valid JWT (Access Token).
+// They handle session management and logging out.
+
+export const protectedAuthRoutes = new Elysia({
+  prefix: "/auth",
+  tags: ["Auth"],
+})
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  // Log out of a specific device or browser session.
+  .post(
+    "/logout",
+    ({ actor, body, ip }) =>
+      AuthController.logout(body.sessionId, actor, { ip }),
+    {
+      body: SignOutBody,
+      detail: {
+        summary: "Logout from a specific session",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  // Log out of ALL sessions (panic button / security reset).
+  .post(
+    "/logout/all",
+    ({ actor, ip }) => AuthController.logoutAll(actor, { ip }),
+    {
+      detail: {
+        summary: "Revoke all active sessions",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 4. Protected PIN routes ───────────────────────────────────────────────────
+
+export const protectedPinRoutes = new Elysia({ prefix: "/pin", tags: ["PIN"] })
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  // Set or update the account's 6-digit security PIN.
+  .post(
+    "/set",
+    ({ actor, body, ip }) => PinController.setPin(body, actor, { ip }),
+    {
+      body: SetPinBody,
+      detail: {
+        summary: "Set or change PIN (requires active session)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 5. OTP routes (protected) ─────────────────────────────────────────────────
+// Generic OTP flow for authenticated users (e.g. verifying email or setting 2FA).
+
+export const otpRoutes = new Elysia({ prefix: "/otp", tags: ["OTP"] })
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .post(
+    "/request",
+    ({ actor, body, ip }) => OtpController.request(body, actor, { ip }),
+    {
+      body: OtpRequestBody,
+      detail: {
+        summary: "Request OTP for email verify, 2FA, or account deletion",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .post(
+    "/verify",
+    ({ actor, body, ip }) => OtpController.verify(body, actor, { ip }),
+    {
+      body: OtpVerifyBody,
+      detail: {
+        summary: "Verify an OTP code",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 6. User / profile routes (protected) ─────────────────────────────────────
+// CRUD operations for user profiles and account status.
+
+export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .get(
+    "/",
+    ({ actor, query }) => UserController.list(parsePagination(query), actor),
+    {
+      query: PaginationQuery,
+      detail: {
+        summary: "List all users (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .get("/me", ({ actor }) => UserController.getById(actor.id, actor), {
+    detail: {
+      summary: "Get current user profile",
+      security: [{ bearerAuth: [] }],
+    },
+  })
+
+  .get(
+    "/:id",
+    ({ actor, params }) => UserController.getById(params.id, actor),
+    {
+      params: UUIDParam,
+      detail: {
+        summary: "Get a user by ID",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .patch(
+    "/me",
+    ({ actor, body, ip }) =>
+      UserController.update(actor.id, body, actor, { ip }),
+    {
+      body: UpdateProfileBody,
+      detail: {
+        summary: "Update current user profile",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .patch(
+    "/:id",
+    ({ actor, params, body, ip }) =>
+      UserController.update(params.id, body, actor, { ip }),
+    {
+      params: UUIDParam,
+      body: UpdateProfileBody,
+      detail: {
+        summary: "Update a user profile (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .patch(
+    "/:id/status",
+    ({ actor, params, body, ip }) =>
+      UserController.updateStatus(params.id, body.status, actor, { ip }),
+    {
+      params: UUIDParam,
+      body: t.Object({
+        status: t.Union([
+          t.Literal("active"),
+          t.Literal("suspended"),
+          t.Literal("deactivated"),
+          t.Literal("banned"),
+        ]),
+      }),
+      detail: {
+        summary: "Update account status (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .delete(
+    "/me",
+    ({ actor, ip }) => UserController.softDelete(actor.id, actor, { ip }),
+    {
+      detail: {
+        summary: "Delete current user account",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .delete(
+    "/:id",
+    ({ actor, params, ip }) =>
+      UserController.softDelete(params.id, actor, { ip }),
+    {
+      params: UUIDParam,
+      detail: {
+        summary: "Soft-delete a user account (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 7. 2FA routes (protected) ─────────────────────────────────────────────────
+// Management of Time-based One-Time Password (TOTP) two-factor authentication.
+export const twoFactorRoutes = new Elysia({ prefix: "/2fa", tags: ["2FA"] })
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  // Step 1 of enabling: sends OTP to user's phone
+  .post(
+    "/enable",
+    ({ actor, ip }) => TwoFactorController.enable(actor, { ip }),
+    {
+      detail: {
+        summary: "Enable 2FA — step 1, sends OTP to phone",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  // Step 2 of enabling: verify OTP → sets twoFactorEnabled = true
+  .post(
+    "/enable/verify",
+    ({ actor, body, ip }) =>
+      TwoFactorController.verifyEnable(body.totp, actor, { ip }),
+    {
+      body: TwoFactorVerifyBody,
+      detail: {
+        summary: "Enable 2FA — step 1.5, confirm OTP to activate",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  // Step 1 of disabling: sends OTP to confirm identity before disabling
+  .post(
+    "/disable",
+    ({ actor, ip }) => TwoFactorController.disable(actor, { ip }),
+    {
+      detail: {
+        summary: "Disable 2FA — step 1, sends OTP to phone",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  // Step 2 of disabling: verify OTP → sets twoFactorEnabled = false
+  .post(
+    "/disable/verify",
+    ({ actor, body, ip }) =>
+      TwoFactorController.verifyDisable(body.totp, actor, { ip }),
+    {
+      body: TwoFactorVerifyBody,
+      detail: {
+        summary: "Disable 2FA — step 2, confirm OTP to deactivate",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 8. Session routes (protected) ─────────────────────────────────────────────
+// View and revoke active login sessions.
+
+export const sessionRoutes = new Elysia({
+  prefix: "/sessions",
+  tags: ["Sessions"],
+})
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .get("/", ({ actor }) => SessionController.listMine(actor), {
+    detail: {
+      summary: "List active sessions",
+      security: [{ bearerAuth: [] }],
+    },
+  })
+
+  .delete(
+    "/:id",
+    ({ actor, params, ip }) =>
+      SessionController.revoke(params.id, actor, { ip }),
+    {
+      params: UUIDParam,
+      detail: {
+        summary: "Revoke a specific session",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 9. Device routes (protected) ──────────────────────────────────────────────
+// Manage trusted devices and hardware-level revocation.
+
+export const deviceRoutes = new Elysia({
+  prefix: "/devices",
+  tags: ["Devices"],
+})
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .get("/", ({ actor }) => DeviceController.listMine(actor), {
+    detail: {
+      summary: "List known devices",
+      security: [{ bearerAuth: [] }],
+    },
+  })
+
+  .patch(
+    "/:id",
+    ({ actor, params, body, ip }) =>
+      DeviceController.setTrusted(params.id, body.trusted, actor, { ip }),
+    {
+      params: UUIDParam,
+      body: SetTrustedBody,
+      detail: {
+        summary: "Trust or untrust a device",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .delete(
+    "/:id/revoke",
+    ({ actor, params, ip }) =>
+      DeviceController.revoke(params.id, actor, { ip }),
+    {
+      params: UUIDParam,
+      detail: {
+        summary: "Soft-revoke a device",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .delete(
+    "/:id",
+    ({ actor, params, ip }) =>
+      DeviceController.remove(params.id, actor, { ip }),
+    {
+      params: UUIDParam,
+      detail: {
+        summary: "Permanently remove a device",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 10. Referral routes (protected) ───────────────────────────────────────────
+// Tracking and generation of referral codes for user growth.
+
+export const referralRoutes = new Elysia({
+  prefix: "/referrals",
+  tags: ["Referrals"],
+})
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .get("/my-code", ({ actor }) => ReferralController.getMyCode(actor), {
+    detail: {
+      summary: "Get current user's referral code",
+      security: [{ bearerAuth: [] }],
+    },
+  })
+
+  .post(
+    "/generate-code",
+    ({ actor }) => ReferralController.generateCode(actor),
+    {
+      detail: {
+        summary: "Generate a referral code (idempotent)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .get(
+    "/",
+    ({ actor, query }) =>
+      ReferralController.listMine(actor, parsePagination(query)),
+    {
+      query: PaginationQuery,
+      detail: {
+        summary: "List referrals made by current user",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 11. Role routes (protected — admin only) ──────────────────────────────────
+// RBAC management — creating roles and assigning them to users.
+
+export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
+  .derive(resolveRequestContext)
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .get("/", ({ actor }) => RoleController.list(actor), {
+    detail: {
+      summary: "List all roles (admin)",
+      security: [{ bearerAuth: [] }],
+    },
+  })
+
+  .post(
+    "/",
+    ({ actor, body, ip }) => RoleController.create(body, actor, { ip }),
+    {
+      body: CreateRoleBody,
+      detail: {
+        summary: "Create a new role (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .delete(
+    "/:roleId",
+    ({ actor, params, ip }) =>
+      RoleController.delete(params.roleId, actor, { ip }),
+    {
+      params: RoleParams,
+      detail: {
+        summary: "Delete a non-system role (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .post(
+    "/:roleId/users/:userId",
+    ({ actor, params, ip }) =>
+      RoleController.assignToUser(params.userId, params.roleId, actor, { ip }),
+    {
+      params: RoleUserParams,
+      detail: {
+        summary: "Assign role to user (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .delete(
+    "/:roleId/users/:userId",
+    ({ actor, params, ip }) =>
+      RoleController.revokeFromUser(params.userId, params.roleId, actor, {
+        ip,
+      }),
+    {
+      params: RoleUserParams,
+      detail: {
+        summary: "Revoke role from user (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── 12. Audit routes (protected) ──────────────────────────────────────────────
+// Activity logs for security auditing and tracking resource changes.
+
+export const auditRoutes = new Elysia({ prefix: "/audit", tags: ["Audit"] })
+  .use(jwtAuthPlugin)
+  .derive(authenticate)
+
+  .get(
+    "/me",
+    ({ actor, query }) =>
+      AuditController.listMine(actor, parsePagination(query)),
+    {
+      query: PaginationQuery,
+      detail: {
+        summary: "List audit entries for current user",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  )
+
+  .get(
+    "/resource/:resource/:resourceId",
+    ({ actor, params, query }) =>
+      AuditController.listByResource(
+        params.resource,
+        params.resourceId,
+        parsePagination(query),
+        actor,
+      ),
+    {
+      params: ResourceAuditParams,
+      query: PaginationQuery,
+      detail: {
+        summary: "List audit entries for a resource (admin)",
+        security: [{ bearerAuth: [] }],
+      },
+    },
+  );
+
+// ── Composed plugin ───────────────────────────────────────────────────────────
+
+export const authPlugin = new Elysia({ name: "auth-plugin" })
+  // ── Public ──
+  .use(publicAuthRoutes)
+  .use(publicPinRoutes)
+  // ── Protected ──
+  .use(protectedAuthRoutes)
+  .use(protectedPinRoutes)
+  .use(otpRoutes)
+  .use(userRoutes)
+  .use(twoFactorRoutes)
+  .use(sessionRoutes)
+  .use(deviceRoutes)
+  .use(referralRoutes)
+  .use(roleRoutes)
+  .use(auditRoutes);
