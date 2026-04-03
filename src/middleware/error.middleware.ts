@@ -15,6 +15,7 @@
  */
 
 import Elysia, { status } from "elysia";
+import { ZodError } from "zod";
 import { AppError } from "../core/errors";
 import { logger } from "../core/logger";
 import type { ErrorMeta } from "../core/errors";
@@ -99,6 +100,20 @@ export const errorPlugin = new Elysia({ name: "error-handler" })
         msg,
         undefined,
         undefined,
+        requestId,
+      );
+    }
+
+    // ── Zod validation error (from boundary .parse()) ────────────────────
+    if (error instanceof ZodError) {
+      const appErr = AppError.fromZod(error);
+      set.status = appErr.statusCode;
+      return errorResponse(
+        appErr.code,
+        appErr.statusCode,
+        appErr.message,
+        appErr.details,
+        appErr.meta,
         requestId,
       );
     }

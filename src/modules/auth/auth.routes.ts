@@ -36,6 +36,29 @@ import type { AuthUser } from "../../middleware/auth.middleware";
 import { rateLimit } from "../../middleware/rateLimit.middleware";
 import { env } from "../../config/env";
 import { AuthErrors } from "./auth.errors";
+import {
+  UUIDParam,
+  PaginationQuery,
+  SendOtpBody,
+  VerifyOtpBody,
+  RegisterBody,
+  LoginWithPinBody,
+  LoginWithOtpTokenBody,
+  SignOutBody,
+  OtpRequestBody,
+  OtpVerifyBody,
+  SetPinBody,
+  PinResetRequestBody,
+  PinResetConfirmBody,
+  UpdateProfileBody,
+  UpdateStatusBody,
+  TwoFactorVerifyBody,
+  CreateRoleBody,
+  RoleParams,
+  RoleUserParams,
+  SetTrustedBody,
+  ResourceAuditParams,
+} from "./auth.schema";
 
 // ── Rate limit windows ────────────────────────────────────────────────────────
 
@@ -44,20 +67,7 @@ const RL_OTP_WINDOW = env.RATE_LIMIT_OTP_WINDOW_SEC;
 const RL_COOLDOWN = env.RATE_LIMIT_COOLDOWN_SEC;
 
 // ── Shared TypeBox primitives ─────────────────────────────────────────────────
-
-const E164Phone = t.String({
-  pattern: "^(\\+[1-9]\\d{6,14}|\\d{10,12})$",
-  description: "E.164 phone number (or 10-12 digit input)",
-});
-
-const UUIDParam = t.Object({ id: t.String({ format: "uuid" }) });
-
-const PaginationQuery = t.Object({
-  page: t.Optional(t.Numeric({ minimum: 1, default: 1 })),
-  limit: t.Optional(t.Numeric({ minimum: 1, maximum: 100, default: 20 })),
-  order: t.Optional(t.Union([t.Literal("asc"), t.Literal("desc")])),
-  cursor: t.Optional(t.String()),
-});
+// Schemas imported from auth.schema.ts
 
 /**
  * Safely parses pagination query parameters into standard numeric values.
@@ -73,113 +83,6 @@ function parsePagination(query: typeof PaginationQuery.static) {
     cursor: query.cursor,
   };
 }
-
-// ── Auth bodies ───────────────────────────────────────────────────────────────
-
-const SendOtpBody = t.Object({ phone: E164Phone });
-
-const VerifyOtpBody = t.Object({
-  phone: E164Phone,
-  otp: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
-});
-
-const RegisterBody = t.Object({
-  otpToken: t.String({ minLength: 32, description: "From /auth/otp/verify" }),
-  name: t.String({ minLength: 1, maxLength: 255 }),
-  referralCode: t.Optional(
-    t.String({ minLength: 3, maxLength: 20, pattern: "^[A-Z0-9]+$" }),
-  ),
-});
-
-const LoginWithPinBody = t.Object({
-  phone: E164Phone,
-  pin: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
-});
-
-const LoginWithOtpTokenBody = t.Object({
-  otpToken: t.String({ minLength: 32, description: "From /auth/otp/verify" }),
-});
-
-const SignOutBody = t.Object({ sessionId: t.String({ format: "uuid" }) });
-
-// ── OTP bodies ────────────────────────────────────────────────────────────────
-
-const OtpPurpose = t.Union([
-  t.Literal("phone_verification"),
-  t.Literal("pin_reset"),
-  t.Literal("enable_2fa"),
-  t.Literal("disable_2fa"),
-  t.Literal("account_deletion"),
-]);
-
-const OtpRequestBody = t.Object({
-  purpose: OtpPurpose,
-  phone: t.Optional(E164Phone),
-  email: t.Optional(t.String({ format: "email" })),
-});
-
-const OtpVerifyBody = t.Object({
-  purpose: OtpPurpose,
-  otp: t.String({ minLength: 4, maxLength: 8, pattern: "^\\d+$" }),
-  phone: t.Optional(E164Phone),
-  email: t.Optional(t.String({ format: "email" })),
-});
-
-// ── PIN bodies ────────────────────────────────────────────────────────────────
-
-const SetPinBody = t.Object({
-  pin: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
-  confirmPin: t.String({ minLength: 6, maxLength: 6 }),
-});
-
-const PinResetRequestBody = t.Object({ phone: E164Phone });
-
-const PinResetConfirmBody = t.Object({
-  otpToken: t.String({ minLength: 32 }),
-  newPin: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
-  confirmPin: t.String({ minLength: 6, maxLength: 6 }),
-});
-
-// ── User / profile bodies ─────────────────────────────────────────────────────
-
-const UpdateProfileBody = t.Object({
-  name: t.Optional(t.String({ minLength: 1, maxLength: 255 })),
-  email: t.Optional(t.String({ format: "email" })),
-});
-
-// ── 2FA bodies ────────────────────────────────────────────────────────────────
-
-const TwoFactorVerifyBody = t.Object({
-  totp: t.String({ minLength: 6, maxLength: 6, pattern: "^\\d{6}$" }),
-});
-
-// ── Role bodies ───────────────────────────────────────────────────────────────
-
-const CreateRoleBody = t.Object({
-  name: t.String({ minLength: 1, maxLength: 255 }),
-  slug: t.String({ minLength: 1, maxLength: 100, pattern: "^[a-z0-9-]+$" }),
-  description: t.Optional(t.String({ maxLength: 1000 })),
-});
-
-const RoleParams = t.Object({ roleId: t.String({ format: "uuid" }) });
-
-const RoleUserParams = t.Object({
-  roleId: t.String({ format: "uuid" }),
-  userId: t.String({ format: "uuid" }),
-});
-
-// ── Device / audit ────────────────────────────────────────────────────────────
-
-const SetTrustedBody = t.Object({ trusted: t.Boolean() });
-
-const ResourceAuditParams = t.Object({
-  resource: t.String(),
-  resourceId: t.String({ format: "uuid" }),
-});
-
-// ── resolveRequestContext ─────────────────────────────────────────────────────
-// Extracts ip, userAgent, and deviceInfo from the raw request.
-// These are HTTP-layer concerns — they belong here, not in the controller.
 
 type DeviceInfo = {
   browser: string;
@@ -638,14 +541,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
       UserController.updateStatus(params.id, body.status, actor, { ip }),
     {
       params: UUIDParam,
-      body: t.Object({
-        status: t.Union([
-          t.Literal("active"),
-          t.Literal("suspended"),
-          t.Literal("deactivated"),
-          t.Literal("banned"),
-        ]),
-      }),
+      body: UpdateStatusBody,
       detail: {
         summary: "Update account status (admin)",
         security: [{ bearerAuth: [] }],

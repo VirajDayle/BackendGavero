@@ -45,6 +45,19 @@ import type {
   SendOtpRequest,
   SetPin,
   UpdateProfile,
+  VerifyOtpRequest
+} from "./auth.schema";
+
+import {
+  setPinSchema,
+  resetPinSchema,
+  otpRequestSchema,
+  otpVerifySchema,
+  sendOtpSchema,
+  verifyOtpSchema,
+  registerSchema,
+  loginWithPinSchema,
+  loginWithOtpTokenSchema,
 } from "./auth.schema";
 
 import { paginatedRaw } from "../../core/response";
@@ -98,7 +111,14 @@ export type SessionResponse = {
  * 
  * @param raw - The raw session object from the service layer.
  * @returns A sanitized SessionResponse for the client.
+
+const OTP_TOKEN_SECRET = new TextEncoder().encode(env.OTP_TOKEN_SECRET);
+
+/**
+ * Controller-layer guard: verifies the OTP bridge token, enforces single-use
+ * via Redis, and returns the verified phone. Throws before any service call.
  */
+
 function toSessionResponse(raw: {
   accessToken: string;
   refreshToken: string;
@@ -145,15 +165,19 @@ async function verifyAndConsumeOtpToken(
     throw AuthErrors.Otp.tokenInvalid();
   }
 
-  const revoked = await redis.get(`revoke_otp_jti:${payload.jti}`);
-  if (revoked) throw AuthErrors.Otp.tokenInvalid("OTP token already used");
-
-  // Consume immediately — single-use enforcement
-  await redis.setex(
+  // 3. Atomically consume the token to prevent concurrent reuse (TOCTOU protection).
+  // We use SET with NX (Set if Not eXists) to ensure only one request succeeds.
+  const wasSet = await redis.set(
     `revoke_otp_jti:${payload.jti}`,
-    env.OTP_TOKEN_TTL_MIN * 60,
     "1",
+    "EX",
+    env.OTP_TOKEN_TTL_MIN * 60,
+    "NX",
   );
+
+  if (!wasSet) {
+    throw AuthErrors.Otp.tokenInvalid("OTP token already used");
+  }
 
   return payload.phone;
 }
@@ -175,8 +199,9 @@ export const AuthController = {
     body: SendOtpRequest,
     meta: Pick<Meta, "ip">,
   ): Promise<{ expiresAt: string }> {
-    // ← updated return type
     const normalizedBody = { ...body, phone: normalizePhone(body.phone) };
+    sendOtpSchema.parse(normalizedBody);
+
     return await AuthService.sendOtp(normalizedBody, { ip: meta.ip });
   },
 
@@ -190,10 +215,12 @@ export const AuthController = {
    * @returns Registration status and a proof-of-verification bridge token.
    */
   async verifyOtp(
-    body: { phone: string; otp: string },
+    body: VerifyOtpRequest,
     meta: Pick<Meta, "ip">,
   ): Promise<{ isRegistered: boolean; otpToken: string }> {
     const normalizedBody = { ...body, phone: normalizePhone(body.phone) };
+    verifyOtpSchema.parse(normalizedBody);
+
     return AuthService.verifyOtp(normalizedBody, { ip: meta.ip });
   },
 
@@ -210,6 +237,8 @@ export const AuthController = {
     body: RegisterRequest,
     meta: Meta & { deviceInfo?: Record<string, unknown> },
   ): Promise<SessionResponse> {
+    registerSchema.parse(body);
+
     // Boundary: verify token and extract trusted phone before hitting service
     const phone = await verifyAndConsumeOtpToken(
       body.otpToken,
@@ -232,6 +261,8 @@ export const AuthController = {
     meta: Meta & { deviceInfo?: Record<string, unknown> },
   ): Promise<SessionResponse> {
     const normalizedBody = { ...body, phone: normalizePhone(body.phone) };
+    loginWithPinSchema.parse(normalizedBody);
+
     const raw = await AuthService.loginWithPin(normalizedBody, meta);
     return toSessionResponse(raw);
   },
@@ -248,6 +279,8 @@ export const AuthController = {
     body: LoginWithOtpToken,
     meta: Meta & { deviceInfo?: Record<string, unknown> },
   ): Promise<SessionResponse> {
+    loginWithOtpTokenSchema.parse(body);
+
     const phone = await verifyAndConsumeOtpToken(
       body.otpToken,
       "phone_verification",
@@ -328,8 +361,17 @@ export const OtpController = {
     const normalizedBody = {
       ...body,
       phone: body.phone ? normalizePhone(body.phone) : undefined,
+      email: body.email?.toLowerCase(),
     };
-    return OtpService.request(normalizedBody, { actorId: actor.id, ip: meta.ip });
+
+    // Cross-field guard: phone OR email must be present
+    // Schema validates normalized E.164 and lowercase email.
+    otpRequestSchema.parse(normalizedBody);
+
+    return OtpService.request(normalizedBody, {
+      actorId: actor.id,
+      ip: meta.ip,
+    });
   },
 
   /**
@@ -348,7 +390,12 @@ export const OtpController = {
     const normalizedBody = {
       ...body,
       phone: body.phone ? normalizePhone(body.phone) : undefined,
+      email: body.email?.toLowerCase(),
     };
+
+    // Cross-field guard: phone OR email must be present
+    otpVerifySchema.parse(normalizedBody);
+
     return OtpService.verify(normalizedBody, { actorId: actor.id, ip: meta.ip });
   },
 };
@@ -370,6 +417,9 @@ export const PinController = {
     actor: Actor,
     meta: Pick<Meta, "ip">,
   ): Promise<void> {
+    // Cross-field guard: pin === confirmPin
+    setPinSchema.parse(body);
+
     return PinService.setPin(body, { actorId: actor.id, ip: meta.ip });
   },
 
@@ -395,6 +445,10 @@ export const PinController = {
    */
   async resetConfirm(body: ResetPin, meta: Pick<Meta, "ip">): Promise<void> {
     const phone = await verifyAndConsumeOtpToken(body.otpToken, "pin_reset");
+
+    // Cross-field guard: newPin === confirmPin
+    resetPinSchema.parse(body);
+
     return PinService.resetPin({ ...body, phone }, { ip: meta.ip });
   },
 };

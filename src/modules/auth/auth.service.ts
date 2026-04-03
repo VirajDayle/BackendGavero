@@ -38,9 +38,10 @@ import type {
   Pagination,
   UserPublic,
   LoginFailureReason,
+  VerifyOtpRequest
 } from "./auth.schema";
 
-import { mapToUserPublic } from "./auth.schema"; // ← value import, not type
+import { mapToUserPublic } from "./auth.schema"; // ← value imports
 
 import { NotificationService } from "./notification.service";
 import { AuthErrors } from "./auth.errors";
@@ -118,6 +119,36 @@ async function signAccessToken(payload: {
     .setIssuedAt()
     .setExpirationTime(`${env.JWT_ACCESS_TTL_MIN ?? 15}m`)
     .sign(ACCESS_SECRET);
+}
+
+/**
+ * Blacklists a single session's Access Token JTI in Redis.
+ */
+async function blacklistSession(
+  session: { accessTokenJti?: string | null },
+  reason: string,
+) {
+  if (session.accessTokenJti) {
+    await redis.setex(
+      `revoke_jti:${session.accessTokenJti}`,
+      (env.JWT_ACCESS_TTL_MIN ?? 15) * 60,
+      reason,
+    );
+  }
+}
+
+/**
+ * Blacklists ALL active Access Token JTIs for a user in Redis.
+ */
+async function blacklistUserSessions(
+  userId: string,
+  repos: AuthRepositories,
+  reason: string,
+) {
+  const activeSessions = await repos.sessionRepo.listActiveByUser(userId);
+  for (const session of activeSessions) {
+    await blacklistSession(session, reason);
+  }
 }
 
 // ── 1. AuthService ────────────────────────────────────────────────────────────
@@ -238,7 +269,7 @@ export class AuthServiceImpl {
    * @throws AuthErrors.Otp.invalid if the code is incorrect.
    */
   async verifyOtp(
-    body: { phone: string; otp: string },
+    body: VerifyOtpRequest,
     meta: { ip: string },
   ): Promise<{ isRegistered: boolean; otpToken: string }> {
     const phone = body.phone;
@@ -247,23 +278,38 @@ export class AuthServiceImpl {
     const record = await this.repos.otpRepo.findActiveByPhone(phone, "phone_verification");
     if (!record) throw AuthErrors.Otp.notFound();
 
-    // Prevent brute-forcing by limiting attempts per record.
-    if (record.attempts >= record.maxAttempts)
-      throw AuthErrors.Otp.maxAttempts();
-
-    // Verify the decrypted OTP BEFORE incrementing.
-    const valid = await verifyPin(record.otpHash, body.otp);
-
-    // Increment attempts ATOMICALLY.
+    // 1. Increment attempts ATOMICALLY FIRST (TOCTOU protection).
+    // We count the attempt BEFORE we verify it to prevent in-flight flooding.
     const updated = await this.repos.otpRepo.incrementAndGetAttempts(record.id);
     if (!updated) throw AuthErrors.Otp.notFound();
 
-    logger.debug({ recordId: record.id, phone, valid, attempts: updated.attempts, max: record.maxAttempts }, "OTP verify step");
+    // 2. Immediate threshold check BEFORE the expensive hash.
+    // Allow up to exactly maxAttempts total increments.
+    if (updated.attempts > record.maxAttempts) {
+      throw AuthErrors.Otp.maxAttempts();
+    }
+
+    logger.debug(
+      {
+        recordId: record.id,
+        phone,
+        attempts: updated.attempts,
+        max: record.maxAttempts,
+      },
+      "OTP verify attempt registered",
+    );
+
+    // 3. Verify the decrypted OTP (Expensive CPU work).
+    const valid = await verifyPin(record.otpHash, body.otp);
 
     if (!valid) {
-      logger.warn({ phone, attempts: updated.attempts, maxAttempts: record.maxAttempts }, "OTP verification failed");
-      // If this failed attempt was the last one allowed
-      if (updated.attempts >= record.maxAttempts) throw AuthErrors.Otp.maxAttempts();
+      logger.warn(
+        { phone, attempts: updated.attempts, maxAttempts: record.maxAttempts },
+        "OTP verification failed",
+      );
+      // If this specific failure was the last one allowed, throw specialized error.
+      if (updated.attempts >= record.maxAttempts)
+        throw AuthErrors.Otp.maxAttempts();
       throw AuthErrors.Otp.invalid();
     }
 
@@ -315,6 +361,7 @@ export class AuthServiceImpl {
       deviceInfo?: Record<string, unknown>;
     },
   ) {
+
     const phone = body.phone;
 
     const existing = await this.repos.userRepo.findByPhone(phone);
@@ -503,13 +550,24 @@ export class AuthServiceImpl {
       );
     }
 
-    // 3. Verify PIN.
+    // 3. Increment failures ATOMICALLY FIRST (TOCTOU protection).
+    // We count the attempt BEFORE we verify it to prevent in-flight flooding.
+    // This stops attackers from using the 100ms hashing window to get extra guesses.
+    const failures = await this.repos.userRepo.incrementFailedLogins(user.id);
+
+    // 4. Immediate threshold check.
+    if (failures > MAX_FAILED_ATTEMPTS) {
+      const lockUntil = new Date(Date.now() + LOCK_DURATION_MS);
+      await this.repos.userRepo.lockUntil(user.id, lockUntil);
+      await recordAttempt(false, "too_many_attempts");
+      throw AuthErrors.Pin.locked();
+    }
+
+    // 5. Verify PIN (Slow Cryptographic Hash).
     const pinValid = await verifyPin(user.pinHash, body.pin);
 
     if (!pinValid) {
-      // Increment failures and potentially lock account.
-      const failures = await this.repos.userRepo.incrementFailedLogins(user.id);
-
+      // If this was the final allowed attempt, lock the account now.
       if (failures >= MAX_FAILED_ATTEMPTS) {
         const lockUntil = new Date(Date.now() + LOCK_DURATION_MS);
         await this.repos.userRepo.lockUntil(user.id, lockUntil);
@@ -521,10 +579,10 @@ export class AuthServiceImpl {
       throw AuthErrors.Pin.invalid();
     }
 
-    // 4. Two-Factor check.
+    // 6. Two-Factor check (identity verification).
     if (user.twoFactorEnabled) throw AuthErrors.Auth.twoFactorRequired();
 
-    // 5. Success: Clean up and create session.
+    // 7. Success: Clean up counter and create session.
     await this.repos.userRepo.resetFailedLogins(user.id);
     const result = await this._createSession(user, "pin", meta);
     await recordAttempt(true, undefined, result.sessionId);
@@ -616,8 +674,9 @@ export class AuthServiceImpl {
     if (!session || session.userId !== meta.actorId)
       throw AuthErrors.Session.notFound();
 
-    // Idempotent — skip if already logged out or revoked
-    if (session.status === "logged_out" || session.status === "revoked") return;
+    // 2. Blacklist the JTI in Redis for immediate global invalidation.
+    // This protects against session takeover even if the access token hasn't expired.
+    await blacklistSession(session, "logged_out");
 
     await this.repos.sessionRepo.logout(sessionId);
 
@@ -640,7 +699,13 @@ export class AuthServiceImpl {
    * @param meta - Metadata containing the actor ID and client IP.
    */
   async signOutAll(meta: { actorId: string; ip: string }): Promise<void> {
-    await this.repos.sessionRepo.revokeAllByUser(meta.actorId, "user_sign_out_all");
+    // 1. Blacklist all currently active Access Token JTIs in Redis.
+    await blacklistUserSessions(meta.actorId, this.repos, "sign_out_all");
+
+    await this.repos.sessionRepo.revokeAllByUser(
+      meta.actorId,
+      "user_sign_out_all",
+    );
 
     await this.repos.auditRepo.create({
       actorId: meta.actorId,
@@ -727,9 +792,7 @@ export class AuthServiceImpl {
     await redis.setex(`rotated_rt:${tokenHash}`, 300, session.id);
 
     // REDIS FIX: Blacklist the old JTI
-    if (session.accessTokenJti) {
-      await redis.setex(`revoke_jti:${session.accessTokenJti}`, (env.JWT_ACCESS_TTL_MIN ?? 15) * 60, "rotated");
-    }
+    await blacklistSession(session, "rotated");
 
     // Build roles list for the JWT payload.
     const userRoles = await this.repos.userRoleRepo.findByUserId(session.userId);
@@ -867,9 +930,8 @@ export class OtpServiceImpl {
     if (!user) throw AuthErrors.User.notFound();
 
     // Resolve OTP target: use explicit phone/email from body, or fall back
-    // to the user's registered phone (needed for two_factor_auth / account_deletion
-    // where the caller doesn't pass a target).
-    const phone = body.phone ?? (user.phone ?? null);
+    // to the user's registered phone.
+    const phone = body.phone ?? user.phone ?? null;
     const email = body.email ?? null;
 
     const otp = generateOtp();
@@ -921,16 +983,9 @@ export class OtpServiceImpl {
     const user = await this.repos.userRepo.findById(meta.actorId);
     if (!user) throw AuthErrors.User.notFound();
 
-    const requiresTarget =
-      body.purpose !== "two_factor_auth" && body.purpose !== "account_deletion";
-
-    if (requiresTarget && !body.phone && !body.email)
-      throw AuthErrors.Otp.missingTarget();
-
     let record;
     if (body.phone) {
-      const phone = body.phone;
-      record = await this.repos.otpRepo.findActiveByPhone(phone, body.purpose);
+      record = await this.repos.otpRepo.findActiveByPhone(body.phone, body.purpose);
     } else if (body.email) {
       record = await this.repos.otpRepo.findActiveByEmail(body.email, body.purpose);
     } else {
@@ -939,13 +994,22 @@ export class OtpServiceImpl {
 
     if (!record) throw AuthErrors.Otp.notFound();
 
+    // Increment attempts ATOMICALLY FIRST (TOCTOU protection).
     const updated = await this.repos.otpRepo.incrementAndGetAttempts(record.id);
     if (!updated) throw AuthErrors.Otp.notFound();
-    if (updated.attempts >= record.maxAttempts)
+
+    // Threshold check: Allow up to exactly maxAttempts.
+    if (updated.attempts > record.maxAttempts)
       throw AuthErrors.Otp.maxAttempts();
 
+    // Verify code shape and then perform expensive hash.
     const valid = await verifyPin(record.otpHash, body.otp);
-    if (!valid) throw AuthErrors.Otp.invalid();
+
+    if (!valid) {
+      if (updated.attempts >= record.maxAttempts)
+        throw AuthErrors.Otp.maxAttempts();
+      throw AuthErrors.Otp.invalid();
+    }
 
     await this.repos.otpRepo.markVerifiedAndConsume(record.id);
 
@@ -1008,13 +1072,11 @@ export class PinServiceImpl {
     const user = await this.repos.userRepo.findById(meta.actorId);
     if (!user) throw AuthErrors.User.notFound();
 
-    if (body.pin.length !== 6 || !/^\d+$/.test(body.pin))
-      throw AuthErrors.Pin.format();
-
-    if (body.pin !== body.confirmPin) throw AuthErrors.Pin.mismatch();
-
     const pinHash = await hashPin(body.pin);
     await this.repos.userRepo.updatePinHash(meta.actorId, pinHash);
+
+    // Revoke all sessions and blacklist tokens after PIN change
+    await blacklistUserSessions(meta.actorId, this.repos, "pin_changed");
     await this.repos.sessionRepo.revokeAllByUser(meta.actorId, "pin_changed");
 
     await this.repos.auditRepo.create({
@@ -1098,13 +1160,11 @@ export class PinServiceImpl {
     const user = await this.repos.userRepo.findByPhone(phone);
     if (!user || user.deletedAt) throw AuthErrors.User.notFound();
 
-    if (body.newPin.length !== 6 || !/^\d+$/.test(body.newPin))
-      throw AuthErrors.Pin.format();
-
-    if (body.newPin !== body.confirmPin) throw AuthErrors.Pin.mismatch();
-
     const pinHash = await hashPin(body.newPin);
     await this.repos.userRepo.updatePinHash(user.id, pinHash);
+
+    // Revoke all sessions and blacklist tokens after PIN change
+    await blacklistUserSessions(user.id, this.repos, "pin_reset");
     await this.repos.sessionRepo.revokeAllByUser(user.id, "pin_reset");
 
     await this.repos.auditRepo.create({
@@ -1168,6 +1228,12 @@ export class UserServiceImpl {
     const user = await this.repos.userRepo.findById(id);
     if (!user) throw AuthErrors.User.notFound();
     await this.repos.userRepo.update(id, { status: newStatus });
+
+    // Security revocation: if banned or suspended, kick out all sessions immediately.
+    if (newStatus === "banned" || newStatus === "suspended") {
+      await blacklistUserSessions(id, this.repos, `account_${newStatus}`);
+      await this.repos.sessionRepo.revokeAllByUser(id, `account_${newStatus}`);
+    }
     await this.repos.auditRepo.create({
       actorId: meta.actorId,
       actorIp: meta.ip,
@@ -1259,6 +1325,9 @@ export class UserServiceImpl {
       throw AuthErrors.Common.forbidden();
     const deleted = await this.repos.userRepo.softDelete(id, meta.actorId);
     if (!deleted) throw AuthErrors.User.notFound();
+
+    // Revoke all sessions and blacklist tokens before account deletion
+    await blacklistUserSessions(id, this.repos, "account_deleted");
     await this.repos.sessionRepo.revokeAllByUser(id, "account_deleted");
     await this.repos.auditRepo.create({
       actorId: meta.actorId,
@@ -1311,6 +1380,10 @@ export class SessionServiceImpl {
     if (!session) throw AuthErrors.Session.notFound();
     if (session.userId !== meta.actorId && !meta.actorRoles.includes("admin"))
       throw AuthErrors.Session.forbidden();
+
+    // Blacklist JTI before revoking in DB
+    await blacklistSession(session, "user_revoked");
+
     await this.repos.sessionRepo.revoke(sessionId, "user_revoked");
     await this.repos.auditRepo.create({
       actorId: meta.actorId,

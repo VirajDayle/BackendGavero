@@ -25,6 +25,10 @@ class Common {
     return new AppError(400, "BAD_REQUEST", msg, meta("validate"));
   }
 
+  static validation(msg = "Invalid input") {
+    return new AppError(422, "VALIDATION_ERROR", msg, meta("validate"));
+  }
+
   static forbidden(msg = "Insufficient permissions") {
     return new AppError(403, "FORBIDDEN", msg, meta("authorize"));
   }

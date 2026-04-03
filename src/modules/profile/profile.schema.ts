@@ -1,36 +1,5 @@
-/**
- * profile.schema.ts
- *
- * Zod validation schemas derived from profile.model.ts via drizzle-zod.
- *
- * Covers:
- *   1.  Enums
- *   2.  Cities
- *   3.  Serviceable Pincodes
- *   4.  Bank Accounts
- *   5.  KYC Documents
- *   6.  Addresses
- *   7.  Shop Owner Profiles
- *   8.  Delivery Partner Profiles
- *   9.  Customer Profiles
- *   10. Composite / request schemas
- *
- * ─── Conventions ─────────────────────────────────────────────────────────────
- *   • Every Insert schema strips server-set fields (id, createdAt, updatedAt,
- *     deletedAt) — callers must never supply these.
- *   • Every Update schema makes all fields optional and omits immutable columns.
- *   • Monetary amounts validated as non-negative integers (paise).
- *   • Object-store keys are validated as non-empty strings ≤ 500 chars.
- *   • Encrypted fields are validated for presence only (non-empty ciphertext);
- *     format validation happens inside the encryption service.
- *   • "Public" schemas strip sensitive / internal fields before API responses.
- */
 
-// import {
-//   createInsertSchema,
-//   createSelectSchema,
-//   createUpdateSchema,
-// } from "drizzle-zod";
+
 import { z } from "zod";
 
 // import {
@@ -57,7 +26,7 @@ const uuidSchema = z.uuid();
 const pincodeSchema = z
   .string()
   .regex(/^\d{6}$/, "Pincode must be exactly 6 digits");
-  
+
 const ifscSchema = z
   .string()
   .length(11)
@@ -112,12 +81,12 @@ const timezoneSchema = z
 
 const latitudeSchema = z
   .number()
-  .min(-90, "Latitude must be ≥ −90")
+  .min(-90, "Latitude must be ≥ -90")
   .max(90, "Latitude must be ≤ 90");
 
 const longitudeSchema = z
   .number()
-  .min(-180, "Longitude must be ≥ −180")
+  .min(-180, "Longitude must be ≥ -180")
   .max(180, "Longitude must be ≤ 180");
 
 const vehicleNumberSchema = z

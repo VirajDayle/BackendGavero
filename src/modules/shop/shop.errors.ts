@@ -14,6 +14,8 @@ export const ShopErrors = {
       new AppError(404, "NOT_FOUND", msg, { module: MODULE }),
     badRequest: (msg = "Invalid request") =>
       new AppError(400, "BAD_REQUEST", msg, { module: MODULE }),
+    validation: (msg = "Invalid input") =>
+      new AppError(422, "VALIDATION_ERROR", msg, { module: MODULE }),
     internal: (msg = "Internal shop error") =>
       new AppError(500, "INTERNAL_ERROR", msg, { module: MODULE }),
   },

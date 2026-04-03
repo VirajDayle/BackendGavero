@@ -22,7 +22,7 @@ class Common {
   }
 
   static validation(msg = "Invalid input") {
-    return new AppError(400, "VALIDATION_ERROR", msg, meta("validate"));
+    return new AppError(422, "VALIDATION_ERROR", msg, meta("validate"));
   }
 
   static adminRequired(msg = "Admin access required") {

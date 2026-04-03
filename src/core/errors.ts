@@ -1,3 +1,5 @@
+import { ZodError } from "zod";
+
 /**
  * core/errors.ts
  *
@@ -229,7 +231,20 @@ export class AppError extends Error {
     return new AppError(429, "RATE_LIMITED", msg);
   }
   static validation(msg: string, details?: unknown) {
-    return new AppError(400, "VALIDATION_ERROR", msg, undefined, details);
+    return new AppError(422, "VALIDATION_ERROR", msg, undefined, details);
+  }
+  static fromZod(error: ZodError, action = "validate") {
+    const details = error.issues.map((issue) => ({
+      field: issue.path.join("."),
+      message: issue.message,
+    }));
+    return new AppError(
+      422,
+      "VALIDATION_ERROR",
+      "Request validation failed",
+      { action },
+      details,
+    );
   }
   static internal(msg = "Internal server error") {
     return new AppError(500, "INTERNAL_ERROR", msg);

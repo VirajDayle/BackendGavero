@@ -23,6 +23,7 @@ import { jwtAuthPlugin } from "../../middleware/auth.middleware";
 import type { AuthUser } from "../../middleware/auth.middleware";
 import { AuthErrors } from "../auth/auth.errors";
 import { ProfileErrors } from "./profile.errors";
+import { env } from "../../config/env";
 
 import {
   ProfileController,
@@ -245,6 +246,14 @@ type RequestContext = {
   deviceInfo: DeviceInfo;
 };
 
+/**
+ * Resolves request context information including the client IP and device fingerprint.
+ * Enforces secure IP resolution via TRUST_PROXY configuration.
+ *
+ * @param ctx - Elysia request context.
+ * @returns Request metadata used across controllers and services.
+ */
+
 function resolveRequestContext({
   request,
   server,
@@ -252,9 +261,20 @@ function resolveRequestContext({
   request: Request;
   server: { requestIP(req: Request): { address: string } | null } | null;
 }): RequestContext {
-  const ip = server?.requestIP(request)?.address ?? "unknown";
+  let ip = server?.requestIP(request)?.address ?? "unknown";
+
+  // Enforce secure IP extraction if behind a proxy.
+  if (env.TRUST_PROXY) {
+    const forwardedFor = request.headers.get("x-forwarded-for");
+    if (forwardedFor) {
+      ip = forwardedFor.split(",")[0].trim();
+    }
+  }
+
   const userAgent = request.headers.get("user-agent") ?? "";
+  const fingerprint = request.headers.get("x-device-fingerprint") ?? "unknown";
   const parseResult = new UAParser(userAgent).getResult();
+
   const deviceInfo = {
     browser: parseResult.browser.name || "Unknown",
     browserVersion: parseResult.browser.version || "Unknown",
@@ -262,13 +282,16 @@ function resolveRequestContext({
     deviceType: parseResult.device.type || "desktop",
     userAgent,
     ip,
+    fingerprint,
   };
+
   return { ip, userAgent, deviceInfo };
 }
 
+
 // ── authenticate ──────────────────────────────────────────────────────────────
 
-function authenticate(ctx: { user?: AuthUser; [key: string]: unknown }): {
+function authenticate(ctx: { user?: AuthUser;[key: string]: unknown }): {
   actor: AuthUser;
 } {
   if (!ctx.user) throw AuthErrors.Common.unauthorized();
@@ -281,7 +304,7 @@ function authenticate(ctx: { user?: AuthUser; [key: string]: unknown }): {
 
 function requireAdminRole({ actor }: { actor: AuthUser }) {
   if (!actor.roles.includes("admin")) {
-    throw AuthErrors.Common.unauthorized();
+    throw AuthErrors.Common.unauthorized("Admin required");
   }
   return {};
 }
@@ -694,10 +717,10 @@ export const adminShopOwnerRoutes = new Elysia({
       }
       return body.isSuspended
         ? ShopOwnerController.suspend(
-            params.userId,
-            { suspensionReason: body.suspensionReason! },
-            { user: actor, ip },
-          )
+          params.userId,
+          { suspensionReason: body.suspensionReason! },
+          { user: actor, ip },
+        )
         : ShopOwnerController.unsuspend(params.userId, { user: actor, ip });
     },
     {
@@ -731,14 +754,14 @@ export const adminDeliveryPartnerRoutes = new Elysia({
       }
       return body.isSuspended
         ? DeliveryPartnerController.suspend(
-            params.userId,
-            { suspensionReason: body.suspensionReason! },
-            { user: actor, ip },
-          )
+          params.userId,
+          { suspensionReason: body.suspensionReason! },
+          { user: actor, ip },
+        )
         : DeliveryPartnerController.unsuspend(params.userId, {
-            user: actor,
-            ip,
-          });
+          user: actor,
+          ip,
+        });
     },
     {
       params: UserIdParam,

@@ -40,7 +40,7 @@ class Common {
 
   /** Thrown when request body/params fail schema validation. */
   static validation(msg = "Invalid input") {
-    return new AppError(400, "VALIDATION_ERROR", msg, meta("validate"));
+    return new AppError(422, "VALIDATION_ERROR", msg, meta("validate"));
   }
 
   /** Thrown when infrastructure-level rate limits are hit. */
