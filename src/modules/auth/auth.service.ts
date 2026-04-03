@@ -7,7 +7,7 @@
  */
 
 import { TimeSpan, createDate } from "oslo";
-import { SignJWT, jwtVerify } from "jose";
+import { SignJWT } from "jose";
 import { validate as validateEmail } from "email-validator";
 import { redis } from "../../config/redis";
 
@@ -48,13 +48,10 @@ import { db } from "../../db";
 import { env } from "../../config/env";
 import { generateId, sha256Hex, hashPin, verifyPin } from "../../utils/hash";
 import { generateOtp } from "../../utils/otp";
-import { normalizePhone } from "../../utils/phone";
 import { logger } from "../../core/logger";
 
 
 // Repos are now injected via dependency injection in the constructor.
-
-
 
 export interface AuthRepositories {
   userRepo: UserRepository;
@@ -81,9 +78,14 @@ const OTP_TOKEN_SECRET = new TextEncoder().encode(env.OTP_TOKEN_SECRET);
 const ACCESS_SECRET = new TextEncoder().encode(env.JWT_SECRET);
 
 /**
- * Issues a short-lived "OTP Bridge Token".
- * This token is a proof-of-verification that the user presents to the
- * /register or /login/otp endpoints after successfully verifying an OTP.
+ * Issues a short-lived "OTP Bridge Token" (JWT).
+ * This token serves as a cryptographically signed proof that the user has
+ * successfully verified an OTP. It must be presented to the `/register`
+ * or `/login/otp` endpoints to complete the flow.
+ * 
+ * @param phone - The verified E.164 phone number.
+ * @param purpose - The purpose for which the OTP was verified (e.g., 'phone_verification').
+ * @returns A promise resolving to a signed HS256 JWT.
  */
 async function issueOtpToken(phone: string, purpose: string): Promise<string> {
   const jti = crypto.randomUUID();
@@ -96,37 +98,12 @@ async function issueOtpToken(phone: string, purpose: string): Promise<string> {
 }
 
 /**
- * Validates the OTP bridge token and extracts the verified phone number.
- */
-async function verifyOtpToken(
-  token: string,
-  expectedPurpose: string,
-): Promise<{ phone: string; jti: string }> {
-  try {
-    const { payload } = await jwtVerify(token, OTP_TOKEN_SECRET);
-
-    if (
-      payload.purpose !== expectedPurpose ||
-      typeof payload.phone !== "string" ||
-      typeof payload.jti !== "string"
-    ) {
-      throw AuthErrors.Otp.tokenInvalid();
-    }
-
-    const revoked = await redis.get(`revoke_otp_jti:${payload.jti}`);
-    if (revoked) {
-      throw AuthErrors.Otp.tokenInvalid("OTP token already used");
-    }
-
-    return { phone: payload.phone, jti: payload.jti };
-  } catch (err) {
-    throw AuthErrors.Otp.tokenInvalid();
-  }
-}
-
-/**
- * Signs a standard JWT access token for the user.
- * Includes the user ID (sub), session ID (jti), and assigned roles.
+ * Signs a standard JWT access token for a user.
+ * The payload includes the User ID (sub), the unique Access Token JTI,
+ * the Session ID (sid), and the user's assigned roles.
+ * 
+ * @param payload - The data to include in the token.
+ * @returns A promise resolving to a signed HS256 JWT.
  */
 async function signAccessToken(payload: {
   sub: string;
@@ -150,18 +127,24 @@ export class AuthServiceImpl {
   /**
    * Orchestrates the "Send OTP" flow:
    * 1. Normalizes the phone number.
-   * 2. Checks rate limits for both phone and IP to prevent spam.
-   * 3. Checks if the user is banned or suspended.
+   * 2. Checks rate limits (IP-based and Phone-based) via the Abuse Repository.
+   * 3. Checks if the account is banned or suspended to prevent sending codes to restricted accounts.
    * 4. Generates a fresh 6-digit OTP and hashes it for secure storage.
    * 5. Invalidates any existing active OTPs for this phone/purpose.
-   * 6. Stores the new OTP record in the database.
+   * 6. Stores the new OTP record in the database within a transaction.
    * 7. Hands off the OTP to the NotificationService for SMS delivery.
+   * 
+   * @param body - The request containing the user's phone number.
+   * @param meta - Metadata containing the client's IP address.
+   * @returns A promise resolving to the OTP expiration timestamp.
+   * @throws AuthErrors.Common.rateLimited if the IP or phone is blocked.
+   * @throws AuthErrors.Otp.deliveryFailed if the SMS service fails.
    */
   async sendOtp(
     body: SendOtpRequest,
     meta: { ip: string },
   ): Promise<{ expiresAt: string }> {
-    const phone = normalizePhone(body.phone);
+    const phone = body.phone;
 
     // ── Persistent abuse check (Postgres layer) ─────────────────────────────
     // Enforces admin-set blockedUntil bans (survives Redis restarts).
@@ -240,18 +223,25 @@ export class AuthServiceImpl {
   /**
    * Orchestrates the "Verify OTP" flow:
    * 1. Retrieves the active OTP record for the phone number.
-   * 2. Increments the attempt counter and checks against the max limit (anti-brute force).
-   * 3. Verifies the provided OTP against the stored hash.
-   * 4. Marks the OTP as verified and consumed.
-   * 5. Checks if the user already exists (determines register vs login).
-   * 6. Issues an "OTP Bridge Token" for the final authentication step.
-   * 7. Logs the successful verification to the audit trail.
+   * 2. Increments the attempt counter ATOMICALLY and checks against the max limit.
+   * 3. Verifies the provided 6-digit code against the stored hash.
+   * 4. Marks the OTP as verified and consumed in a single atomic database operation.
+   * 5. Determines if the user is already registered (determines downstream UI flow).
+   * 6. Issues a short-lived "OTP Bridge Token" (JWT) as proof of verification.
+   * 7. Logs the successful verification event to the audit log.
+   * 
+   * @param body - The request containing the phone and OTP code.
+   * @param meta - Metadata containing the client's IP address for auditing.
+   * @returns A promise resolving to registration status and the bridge token.
+   * @throws AuthErrors.Otp.notFound if no active OTP exists.
+   * @throws AuthErrors.Otp.maxAttempts if the brute-force limit is reached.
+   * @throws AuthErrors.Otp.invalid if the code is incorrect.
    */
   async verifyOtp(
     body: { phone: string; otp: string },
     meta: { ip: string },
   ): Promise<{ isRegistered: boolean; otpToken: string }> {
-    const phone = normalizePhone(body.phone);
+    const phone = body.phone;
 
     // Look for a non-expired, non-consumed OTP.
     const record = await this.repos.otpRepo.findActiveByPhone(phone, "phone_verification");
@@ -301,29 +291,31 @@ export class AuthServiceImpl {
 
   /**
    * Orchestrates User Registration:
-   * 1. Validates the "OTP Bridge Token" to ensure phone ownership was verified.
-   * 2. Checks if the phone is already registered (last-minute race condition check).
-   * 3. Starts a database transaction for atomic account creation.
-   * 4. Creates the user record.
-   * 5. Assigns the default "customer" role.
-   * 6. Processes referral logic if a code was provided.
-   * 7. Generates the user's own unique referral code.
-   * 8. Create an audit log for the new registration.
-   * 9. Initializes the first login session.
+   * 1. Validates the "OTP Bridge Token" to ensure the phone was recently verified.
+   * 2. Revokes the bridge token in Redis to prevent reuse (single-use enforcement).
+   * 3. Checks if the phone is already registered (race condition protection).
+   * 4. Executes a database transaction to atomically:
+   *    - Create the user record.
+   *    - Assign the default "customer" role.
+   *    - Link the user to a referrer if a valid code was provided.
+   *    - Generate the user's own unique referral code for future sharing.
+   *    - Record the registration event in the audit log.
+   * 5. Initializes the first login session and returns the access/refresh tokens.
+   * 
+   * @param body - registration details (name, phone, optional referralCode).
+   * @param meta - Metadata including IP, User Agent, and Device Info.
+   * @returns A promise resolving to the session tokens and user data.
+   * @throws AuthErrors.User.alreadyExists if the phone is taken.
    */
   async register(
-    body: RegisterRequest,
+    body: RegisterRequest & { phone: string },
     meta: {
       ip: string;
       userAgent: string;
       deviceInfo?: Record<string, unknown>;
     },
   ) {
-    // Ensure the user actually verified their phone for registration.
-    const { phone, jti } = await verifyOtpToken(body.otpToken, "phone_verification");
-
-    // Single-use enforcement: revoke the token immediately
-    await redis.setex(`revoke_otp_jti:${jti}`, env.OTP_TOKEN_TTL_MIN * 60, "1");
+    const phone = body.phone;
 
     const existing = await this.repos.userRepo.findByPhone(phone);
     if (existing)
@@ -406,12 +398,21 @@ export class AuthServiceImpl {
 
   /**
    * Orchestrates Login with PIN:
-   * 1. Normalizes phone and retrieves user.
-   * 2. Checks account existence and status (deleted, banned, suspended).
-   * 3. Checks if the account is currently locked due to too many failed attempts.
-   * 4. Verifies the provided 6-digit PIN against the stored hash.
-   * 5. If PIN is wrong: increments fail counter and locks account if threshold reached.
-   * 6. If PIN is right: resets fail counter, creates a new session, and logs success.
+   * 1. Normalizes phone and checks persistent abuse (rate limits) in the database.
+   * 2. Retrieves the user and checks existence, deletion status, and account bans/suspensions.
+   * 3. Anti-Brute Force: Checks if the account is currently locked (failed PIN attempts).
+   * 4. Ensures a PIN is actually set on the account.
+   * 5. Verifies the provided 6-digit PIN against the secure hash.
+   * 6. On failure: Increments the fail counter and locks the account if the threshold is reached.
+   * 7. On success: Resets the fail counter, checks for 2FA requirement, and creates a new session.
+   * 8. Records the auth attempt (success or failure) in the audit log.
+   * 
+   * @param body - The request containing phone and PIN.
+   * @param meta - Metadata including IP, User Agent, and Device Info.
+   * @returns A promise resolving to the session tokens and user data.
+   * @throws AuthErrors.Auth.invalidCredentials for wrong PIN or non-existent user.
+   * @throws AuthErrors.Common.accountLocked if the lockout period is active.
+   * @throws AuthErrors.Auth.twoFactorRequired if TOTP is enabled.
    */
   async loginWithPin(
     body: LoginWithPin,
@@ -421,7 +422,7 @@ export class AuthServiceImpl {
       deviceInfo?: Record<string, unknown>;
     },
   ) {
-    const phone = normalizePhone(body.phone);
+    const phone = body.phone;
 
     // ── Persistent abuse check (Postgres layer) ─────────────────────────────
     // Enforces admin-set blockedUntil bans for repeated login failures.
@@ -535,23 +536,27 @@ export class AuthServiceImpl {
 
   /**
    * Orchestrates Login with OTP Token:
-   * 1. Validates the "OTP Bridge Token".
-   * 2. Checks if the account exists and is not banned/suspended.
-   * 3. Creates a new session and logs the success.
+   * 1. Validates the "OTP Bridge Token" to ensures the user just verified their phone.
+   * 2. Revokes the bridge token (single-use).
+   * 3. Checks if the account exists and is not banned or suspended.
+   * 4. Creates a new session and returns the tokens.
+   * 5. Tracks the authentication event in the audit log.
+   * 
+   * @param body - The request containing the `phone`.
+   * @param meta - Metadata including IP, User Agent, and Device Info.
+   * @returns A promise resolving to the session tokens and user data.
+   * @throws AuthErrors.User.notFound if the account doesn't exist (requires registration).
    */
   async loginWithOtpToken(
-    body: LoginWithOtpToken,
+    body: { phone: string },
     meta: {
       ip: string;
       userAgent: string;
       deviceInfo?: Record<string, unknown>;
     },
   ) {
-    // Verified phone comes from the JWT payload of the bridge token.
-    const { phone, jti } = await verifyOtpToken(body.otpToken, "phone_verification");
-
-    // Single-use enforcement
-    await redis.setex(`revoke_otp_jti:${jti}`, env.OTP_TOKEN_TTL_MIN * 60, "1");
+    // Verified phone comes from the controller after guard check.
+    const phone = body.phone;
     const user = await this.repos.userRepo.findByPhone(phone);
 
     if (!user || user.deletedAt) {
@@ -594,10 +599,14 @@ export class AuthServiceImpl {
 
   /**
    * Logs out a specific session:
-   * 1. Retrieves session and verifies ownership (actorId matches user).
-   * 2. Skips if already inactive.
-   * 3. Marks record as `logged_out` in DB.
-   * 4. Logs event to audit trail.
+   * 1. Retrieves the session and verifies ownership (actorId matches user).
+   * 2. Skips gracefully if the session is already inactive (logged_out or revoked).
+   * 3. Marks the record as `logged_out` in the database.
+   * 4. Blacklists the Access Token JTI in Redis for immediate global invalidation.
+   * 5. Logs the logout event to the audit trail.
+   * 
+   * @param sessionId - The UUID of the session to terminate.
+   * @param meta - Metadata containing the actor ID and client IP.
    */
   async signOut(
     sessionId: string,
@@ -624,8 +633,11 @@ export class AuthServiceImpl {
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Logs out ALL sessions for the current user.
-   * This is a critical security feature for users who have lost a device.
+   * Logs out ALL active sessions for the current user.
+   * This is a critical security feature for users who have lost a device or suspect account compromise.
+   * Revokes all active tokens and blacklists their JTIs.
+   * 
+   * @param meta - Metadata containing the actor ID and client IP.
    */
   async signOutAll(meta: { actorId: string; ip: string }): Promise<void> {
     await this.repos.sessionRepo.revokeAllByUser(meta.actorId, "user_sign_out_all");
@@ -642,11 +654,20 @@ export class AuthServiceImpl {
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Rotates a session's tokens:
-   * 1. Hashes the provided refresh token and looks it up in the database.
-   * 2. Verifies the session is still active and not expired.
-   * 3. Rotates the `accessTokenJti` (invalidating old access tokens even if they haven't expired).
-   * 4. Issues a brand new access token.
+   * Rotates a session's tokens (Refresh Token Rotation):
+   * 1. Hashes the provided Refresh Token and looks it up in the database.
+   * 2. REUSE DETECTION: If the token has already been rotated (checked via Redis grace-period cache),
+   *    revokes the entire session immediately as a security breach measure.
+   * 3. Verifies the session is active and not expired.
+   * 4. Generates a new Refresh Token and updates its hash in the database.
+   * 5. Generates a new Access Token JTI (invalidating the old Access Token globally).
+   * 6. Blacklists the old JTI in Redis for its remaining TTL.
+   * 7. Returns a brand new Access Token and Refresh Token.
+   * 
+   * @param rawRefreshToken - The raw refresh token string from the client.
+   * @param meta - Metadata containing the client IP.
+   * @returns A promise resolving to the new token pair and expiration Date.
+   * @throws AuthErrors.Auth.sessionExpired if the token is invalid, used, or expired.
    */
   async refreshSession(
     rawRefreshToken: string,
@@ -732,13 +753,18 @@ export class AuthServiceImpl {
   // ── Private: shared session creation ──────────────────────────────────────
 
   /**
-   * Internal Helper: Securely creates a new login session.
-   * 1. Generates refresh token (unguessable string) and its hash.
-   * 2. Stores the session in the database with metadata (IP, UA, device info).
-   * 3. Updates device tracking if a fingerprint is present.
-   * 4. Updates user `last_login_at` timestamp.
-   * 5. Audits the sign-in event.
-   * 6. Signs a new JWT access token based on the generated session JTI.
+   * Internal Helper: Securely creates and persists a new login session.
+   * 1. Generates a high-entropy Refresh Token and its SHA-256 hash.
+   * 2. Persists the session record with client metadata (IP, User Agent, Device Info).
+   * 3. Device Tracking: Upserts the device fingerprint to track recognized hardware.
+   * 4. Metadata Update: Updates the user's `last_login_at` and `last_login_ip`.
+   * 5. Audit: Logs the successful sign-in event.
+   * 6. JWT Issuance: Signs the initial Access Token linked to this session's unique JTI.
+   * 
+   * @param user - The user object (requires `id`).
+   * @param method - The auth method used ('otp' or 'pin').
+   * @param meta - Metadata from the HTTP request.
+   * @returns A promise resolving to the full session details and tokens.
    */
   private async _createSession(
     user: { id: string },
@@ -815,11 +841,23 @@ export class AuthServiceImpl {
 
 // ── 2. OtpService ─────────────────────────────────────────────────────────────
 
+/**
+ * Service for managing One-Time Passwords (OTP) for authenticated users.
+ */
 export class OtpServiceImpl {
+  /**
+   * Initializes the OtpServiceImpl.
+   * @param repos - Authentication repositories.
+   */
   constructor(private readonly repos: AuthRepositories) { }
+
   /**
    * Generates and sends a purpose-driven OTP to an authenticated user.
-   * Purposes include `phone_verification`, `email_verification`, `2fa`, etc.
+   * Purposes include `phone_verification`, `email_verification`, `two_factor_auth`, etc.
+   * 
+   * @param body - The OTP request containing purpose and optional phone/email.
+   * @param meta - Metadata containing the IP and actor ID.
+   * @returns A promise resolving to the OTP expiration timestamp.
    */
   async request(
     body: OtpRequest,
@@ -831,9 +869,7 @@ export class OtpServiceImpl {
     // Resolve OTP target: use explicit phone/email from body, or fall back
     // to the user's registered phone (needed for two_factor_auth / account_deletion
     // where the caller doesn't pass a target).
-    const phone = body.phone
-      ? normalizePhone(body.phone)
-      : (user.phone ?? null);
+    const phone = body.phone ?? (user.phone ?? null);
     const email = body.email ?? null;
 
     const otp = generateOtp();
@@ -867,7 +903,16 @@ export class OtpServiceImpl {
 
   /**
    * Verifies an OTP code for an authenticated user.
-   * If the purpose is `phone_verification`, it also marks the user's phone as verified.
+   * Handles diverse purposes:
+   * - `phone_verification`: Marks phone as verified.
+   * - `enable_2fa`/`disable_2fa`: Toggles 2FA status.
+   * - `pin_reset`/`delete_account`: Issues an OTP Bridge Token for the final action.
+   * 
+   * @param body - The verification data (otp, purpose, optional target).
+   * @param meta - Metadata containing IP and actor ID.
+   * @returns A promise resolving to verification status and an optional bridge token.
+   * @throws AuthErrors.Otp.notFound if no active OTP is found.
+   * @throws AuthErrors.Otp.maxAttempts if brute-force limit is reached.
    */
   async verify(
     body: OtpVerify,
@@ -884,7 +929,7 @@ export class OtpServiceImpl {
 
     let record;
     if (body.phone) {
-      const phone = normalizePhone(body.phone);
+      const phone = body.phone;
       record = await this.repos.otpRepo.findActiveByPhone(phone, body.purpose);
     } else if (body.email) {
       record = await this.repos.otpRepo.findActiveByEmail(body.email, body.purpose);
@@ -910,7 +955,7 @@ export class OtpServiceImpl {
     let otpToken: string | undefined;
     const bridgePurposes = ["phone_verification", "pin_reset", "delete_account"];
     if (bridgePurposes.includes(body.purpose)) {
-      const subject = body.phone ? normalizePhone(body.phone) : (user.phone ?? user.id);
+      const subject = body.phone ?? (user.phone ?? user.id);
       otpToken = await issueOtpToken(subject, body.purpose);
     }
 
@@ -937,11 +982,24 @@ export class OtpServiceImpl {
 
 // ── 3. PinService ─────────────────────────────────────────────────────────────
 
+/**
+ * Service for managing security PINs and PIN reset flows.
+ */
 export class PinServiceImpl {
+  /**
+   * Initializes the PinServiceImpl.
+   * @param repos - Authentication repositories.
+   */
   constructor(private readonly repos: AuthRepositories) { }
+
   /**
    * Sets or updates the 6-digit security PIN for an authenticated user.
-   * Forced logout follows to ensure all sessions are re-secured.
+   * Revokes ALL active sessions immediately after a PIN change to ensure security.
+   * 
+   * @param body - The new PIN and its confirmation.
+   * @param meta - Metadata containing the actor ID and client IP.
+   * @throws AuthErrors.Pin.format if not a 6-digit number.
+   * @throws AuthErrors.Pin.mismatch if confirmation doesn't match.
    */
   async setPin(
     body: SetPin,
@@ -971,8 +1029,13 @@ export class PinServiceImpl {
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Public: Requests a PIN reset OTP.
-   * Protects user privacy by always returning success even if the phone isn't registered.
+   * Public Endpoint: Requests a PIN reset OTP.
+   * To prevent phone enumeration, this method always returns success even if the phone
+   * is not found in the database.
+   * 
+   * @param phone - The E.164 phone number.
+   * @param meta - Metadata containing the client IP.
+   * @returns A promise resolving to the estimated expiration timestamp.
    */
   async requestReset(
     phone: string,
@@ -1021,13 +1084,17 @@ export class PinServiceImpl {
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
-   * Public: Completes a PIN reset using an OTP bridge token and a new PIN.
+   * Public Endpoint: Completes a PIN reset using an OTP bridge token and a new PIN.
+   * Validates the bridge token and revokes all active sessions upon success.
+   * 
+   * @param body - The phone and new PIN details.
+   * @param meta - Metadata containing the client IP.
    */
-  async resetPin(body: ResetPin, meta: { ip: string }): Promise<void> {
-    const { phone, jti } = await verifyOtpToken(body.otpToken, "pin_reset");
-
-    // Single-use enforcement
-    await redis.setex(`revoke_otp_jti:${jti}`, env.OTP_TOKEN_TTL_MIN * 60, "1");
+  async resetPin(
+    body: ResetPin & { phone: string },
+    meta: { ip: string },
+  ): Promise<void> {
+    const phone = body.phone;
     const user = await this.repos.userRepo.findByPhone(phone);
     if (!user || user.deletedAt) throw AuthErrors.User.notFound();
 
@@ -1052,11 +1119,24 @@ export class PinServiceImpl {
 
 // ── 4. UserService ────────────────────────────────────────────────────────────
 
+/**
+ * Service for managing user profiles and account status.
+ */
 export class UserServiceImpl {
+  /**
+   * Initializes the UserServiceImpl.
+   * @param repos - Authentication repositories.
+   */
   constructor(private readonly repos: AuthRepositories) { }
+
   /**
    * Retrieves a public user profile.
-   * Enforces that users can only view themselves unless they are an admin.
+   * Enforces Ownership: Users can only view their own profile unless they have 'admin' roles.
+   * 
+   * @param id - The UUID of the user to fetch.
+   * @param actorId - The UUID of the requesting user.
+   * @param actorRoles - The roles of the requesting user.
+   * @returns A promise resolving to the public user data.
    */
   async getById(
     id: string,
@@ -1071,7 +1151,12 @@ export class UserServiceImpl {
   }
 
   /**
-   * Admin Only: Manually updates a user's account status.
+   * Admin Only: Manually updates a user's account status (e.g., active, banned, suspended).
+   * Logs before/after states to the audit log.
+   * 
+   * @param id - The UUID of the user to update.
+   * @param newStatus - The target status.
+   * @param meta - Metadata including actor roles and IP.
    */
   async updateStatus(
     id: string,
@@ -1094,6 +1179,13 @@ export class UserServiceImpl {
     });
   }
 
+  /**
+   * Admin Only: Lists all active users with pagination.
+   * 
+   * @param pagination - Pagination and ordering settings.
+   * @param actorRoles - Roles of the requesting user.
+   * @returns A promise resolving to the list of user profiles and total count.
+   */
   async list(
     pagination: Pagination,
     actorRoles: string[],
@@ -1108,7 +1200,13 @@ export class UserServiceImpl {
 
   /**
    * Updates user profile data (name, email).
-   * Email changes require a new verification (emailVerified set to false).
+   * Note: Changing the email address automatically resets the `emailVerified` status
+   * to false, requiring a new verification cycle.
+   * 
+   * @param id - The UUID of the user to update.
+   * @param body - The partial update data.
+   * @param meta - Metadata containing the actor ID and roles.
+   * @returns A promise resolving to the updated user profile.
    */
   async update(
     id: string,
@@ -1147,7 +1245,11 @@ export class UserServiceImpl {
   }
 
   /**
-   * Marks a user account as deleted and revokes all active sessions.
+   * Performs a soft-delete on a user account.
+   * This revokes all active sessions and marks the user record as deleted.
+   * 
+   * @param id - The UUID of the user to delete.
+   * @param meta - Metadata containing actor ID and roles.
    */
   async softDelete(
     id: string,
@@ -1170,11 +1272,22 @@ export class UserServiceImpl {
 
 // ── 5. SessionService ─────────────────────────────────────────────────────────
 
+/**
+ * Service for managing user sessions (access/refresh tokens).
+ */
 export class SessionServiceImpl {
-  constructor(private readonly repos: AuthRepositories) { }
   /**
-   * Lists active sessions for the authenticated user,
-   * while stripping sensitive internal identifiers.
+   * Initializes the SessionServiceImpl.
+   * @param repos - Authentication repositories.
+   */
+  constructor(private readonly repos: AuthRepositories) { }
+
+  /**
+   * Lists the current user's own active sessions.
+   * Sensitive internal hashes are stripped before returning.
+   * 
+   * @param actorId - The UUID of the user.
+   * @returns An array of active session metadata.
    */
   async listMine(actorId: string) {
     const sessions = await this.repos.sessionRepo.listActiveByUser(actorId);
@@ -1184,7 +1297,11 @@ export class SessionServiceImpl {
   }
 
   /**
-   * Revokes a specific session. Ownership or admin status is checked first.
+   * Revokes a specific session.
+   * Enforces Ownership: Users can only revoke their own sessions unless they are admins.
+   * 
+   * @param sessionId - The UUID of the session to revoke.
+   * @param meta - Metadata containing actor ID and roles.
    */
   async revoke(
     sessionId: string,
@@ -1207,10 +1324,20 @@ export class SessionServiceImpl {
 
 // ── 6. RoleService ────────────────────────────────────────────────────────────
 
+/**
+ * Service for managing Role-Based Access Control (RBAC) configurations.
+ */
 export class RoleServiceImpl {
-  constructor(private readonly repos: AuthRepositories) { }
   /**
-   * Admin Only: Lists all available roles.
+   * Initializes the RoleServiceImpl.
+   * @param repos - Authentication repositories.
+   */
+  constructor(private readonly repos: AuthRepositories) { }
+
+  /**
+   * Admin Only: Lists all role definitions in the system.
+   * 
+   * @param actorRoles - The roles of the requester.
    */
   async list(actorRoles: string[]) {
     if (!actorRoles.includes("admin")) throw AuthErrors.Role.adminRequired();
@@ -1219,6 +1346,10 @@ export class RoleServiceImpl {
 
   /**
    * Admin Only: Creates a new role definition.
+   * Checks for slug uniqueness before insertion.
+   * 
+   * @param body - Name, slug, and description of the role.
+   * @param meta - Metadata including actor ID and roles.
    */
   async create(
     body: { name: string; slug: string; description?: string },
@@ -1241,7 +1372,11 @@ export class RoleServiceImpl {
   }
 
   /**
-   * Admin Only: Deletes a non-system role.
+   * Admin Only: Deletes a role definition.
+   * Note: System-defined roles (isSystem: true) cannot be deleted.
+   * 
+   * @param roleId - The UUID of the role.
+   * @param meta - Metadata including actor ID and roles.
    */
   async delete(
     roleId: string,
@@ -1262,7 +1397,11 @@ export class RoleServiceImpl {
   }
 
   /**
-   * Admin Only: Grants a role to a specific user.
+   * Admin Only: Grants a specific role to a user.
+   * 
+   * @param userId - The UUID of the target user.
+   * @param roleId - The UUID of the role to assign.
+   * @param meta - Metadata including actor ID and roles.
    */
   async assignToUser(
     userId: string,
@@ -1287,7 +1426,11 @@ export class RoleServiceImpl {
   }
 
   /**
-   * Admin Only: Removes a role assignment from a user.
+   * Admin Only: Revokes a role assignment from a user.
+   * 
+   * @param userId - The UUID of the target user.
+   * @param roleId - The UUID of the role to revoke.
+   * @param meta - Metadata including actor ID and roles.
    */
   async revokeFromUser(
     userId: string,
@@ -1311,10 +1454,22 @@ export class RoleServiceImpl {
 
 // ── 7. ReferralService ────────────────────────────────────────────────────────
 
+/**
+ * Service for managing user referrals and referral codes.
+ */
 export class ReferralServiceImpl {
+  /**
+   * Initializes the ReferralServiceImpl.
+   * @param repos - Authentication repositories.
+   */
   constructor(private readonly repos: AuthRepositories) { }
+
   /**
    * Retrieves the referral code for the current user.
+   * 
+   * @param actorId - The UUID of the user.
+   * @returns A promise resolving to the user's referral code record.
+   * @throws AuthErrors.Referral.notFound if no code exists.
    */
   async getMyCode(actorId: string) {
     const code = await this.repos.referralCodeRepo.findByUserId(actorId);
@@ -1323,7 +1478,10 @@ export class ReferralServiceImpl {
   }
 
   /**
-   * Generates a new referral code if none exists.
+   * Generates a new unique referral code for the user if one doesn't already exist.
+   * 
+   * @param actorId - The UUID of the user.
+   * @returns A promise resolving to the created or existing referral code record.
    */
   async generateCode(actorId: string) {
     const existing = await this.repos.referralCodeRepo.findByUserId(actorId);
@@ -1335,7 +1493,11 @@ export class ReferralServiceImpl {
   }
 
   /**
-   * Lists users who used the current user's referral code.
+   * Lists all users who were referred by the current user.
+   * 
+   * @param actorId - The UUID of the user.
+   * @param pagination - Pagination settings.
+   * @returns A promise resolving to the paginated list of referrals.
    */
   async listMine(actorId: string, pagination: Pagination) {
     return this.repos.referralRepo.listByReferrer(actorId, pagination);
@@ -1344,17 +1506,32 @@ export class ReferralServiceImpl {
 
 // ── 8. DeviceService ──────────────────────────────────────────────────────────
 
+/**
+ * Service for managing user devices and hardware fingerprints.
+ */
 export class DeviceServiceImpl {
-  constructor(private readonly repos: AuthRepositories) { }
   /**
-   * Lists devices that have signed into the user's account.
+   * Initializes the DeviceServiceImpl.
+   * @param repos - Authentication repositories.
+   */
+  constructor(private readonly repos: AuthRepositories) { }
+
+  /**
+   * Lists all devices that have ever signed into the user's account.
+   * 
+   * @param actorId - The UUID of the user.
+   * @returns An array of device records.
    */
   async listMine(actorId: string) {
     return this.repos.deviceRepo.listByUser(actorId);
   }
 
   /**
-   * Toggles the 'trusted' status of a user's device.
+   * Toggles the 'trusted' status of a specific device.
+   * 
+   * @param deviceId - The UUID of the device record.
+   * @param trusted - The new trust status.
+   * @param meta - Metadata containing actor ID and IP.
    */
   async setTrusted(
     deviceId: string,
@@ -1375,7 +1552,11 @@ export class DeviceServiceImpl {
   }
 
   /**
-   * Prevents a specific device from being used for future logins.
+   * Revokes a specific device. 
+   * Revoked devices are blocked from future logins using existing saved credentials.
+   * 
+   * @param deviceId - The UUID of the device ID.
+   * @param meta - Metadata containing actor ID and IP.
    */
   async revoke(
     deviceId: string,
@@ -1393,7 +1574,10 @@ export class DeviceServiceImpl {
   }
 
   /**
-   * Permanently removes a device record from the account history.
+   * Permanently removes a device record from the user's history.
+   * 
+   * @param deviceId - The UUID of the device.
+   * @param meta - Metadata containing actor ID and IP.
    */
   async remove(
     deviceId: string,
@@ -1413,17 +1597,34 @@ export class DeviceServiceImpl {
 
 // ── 9. AuditService ───────────────────────────────────────────────────────────
 
+/**
+ * Service for retrieving system and user audit logs.
+ */
 export class AuditServiceImpl {
-  constructor(private readonly repos: AuthRepositories) { }
   /**
-   * Lists audit entries where the current user was the actor.
+   * Initializes the AuditServiceImpl.
+   * @param repos - Authentication repositories.
+   */
+  constructor(private readonly repos: AuthRepositories) { }
+
+  /**
+   * Lists audit logs where the authenticated user was the primary actor.
+   * 
+   * @param actorId - The UUID of the user.
+   * @param pagination - Pagination settings.
+   * @returns A promise resolving to the list of audit logs.
    */
   async listMine(actorId: string, pagination: Pagination) {
     return this.repos.auditRepo.listByActor(actorId, pagination);
   }
 
   /**
-   * Admin Only: Lists all audit activity for a specific resource (e.g. 'user', 'role').
+   * Admin Only: Lists audit activity for a specific resource type and ID.
+   * 
+   * @param resource - The resource type (e.g., 'user', 'session').
+   * @param resourceId - The UUID of the resource.
+   * @param pagination - Pagination settings.
+   * @param actorRoles - Roles check for admin access.
    */
   async listByResource(
     resource: string,

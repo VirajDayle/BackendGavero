@@ -90,9 +90,6 @@ export const userTable = table(
   ],
 );
 
-export type User = InferSelectModel<typeof userTable>;
-export type UserInsert = InferInsertModel<typeof userTable>;
-
 // ---------------------------------------------------------------------------
 // OTP Verifications
 // ---------------------------------------------------------------------------
@@ -151,13 +148,9 @@ export const otpVerificationTable = table(
   ],
 );
 
-export type OtpVerification = InferSelectModel<typeof otpVerificationTable>;
-export type OtpVerificationInsert = InferInsertModel<typeof otpVerificationTable>;
-
 // ---------------------------------------------------------------------------
 // User Sessions
 // ---------------------------------------------------------------------------
-// ! Review and verified !
 
 export const userSessionTable = table(
   "user_sessions",
@@ -221,13 +214,10 @@ export const userSessionTable = table(
   ],
 );
 
-export type UserSession = InferSelectModel<typeof userSessionTable>;
-export type UserSessionInsert = InferInsertModel<typeof userSessionTable>;
-
 // ---------------------------------------------------------------------------
 // Roles & Permissions (RBAC)
 // ---------------------------------------------------------------------------
-// ! review and veirified
+
 export const rolesTable = table("roles", {
   id: t.uuid("id").defaultRandom().primaryKey(),
   name: t.varchar("name", { length: 255 }).notNull(),
@@ -243,9 +233,6 @@ export const rolesTable = table("roles", {
     .defaultNow()
     .notNull(),
 });
-
-export type Role = InferSelectModel<typeof rolesTable>;
-export type RoleInsert = InferInsertModel<typeof rolesTable>;
 
 // ? still doubt
 export const permissionsTable = table(
@@ -267,9 +254,6 @@ export const permissionsTable = table(
     t.index("permissions_resource_idx").on(tbl.resource),
   ],
 );
-
-export type Permission = InferSelectModel<typeof permissionsTable>;
-export type PermissionInsert = InferInsertModel<typeof permissionsTable>;
 
 // ! review and verified
 export const rolePermissionsTable = table(
@@ -295,9 +279,6 @@ export const rolePermissionsTable = table(
     t.index("role_permissions_role_idx").on(tbl.roleId),
   ],
 );
-
-export type RolePermission = InferSelectModel<typeof rolePermissionsTable>;
-export type RolePermissionInsert = InferInsertModel<typeof rolePermissionsTable>;
 
 export const userRolesTable = table(
   "user_roles",
@@ -327,15 +308,14 @@ export const userRolesTable = table(
   },
   (tbl) => [
     t.primaryKey({ columns: [tbl.userId, tbl.roleId] }),
-    t.uniqueIndex("user_roles_user_role_shop_uq").on(tbl.userId, tbl.roleId, tbl.shopId),
+    t
+      .uniqueIndex("user_roles_user_role_shop_uq")
+      .on(tbl.userId, tbl.roleId, tbl.shopId),
     t.index("user_roles_user_idx").on(tbl.userId),
     t.index("user_roles_role_idx").on(tbl.roleId),
     t.index("user_roles_shop_idx").on(tbl.shopId),
   ],
 );
-
-export type UserRole = InferSelectModel<typeof userRolesTable>;
-export type UserRoleInsert = InferInsertModel<typeof userRolesTable>;
 
 // ---------------------------------------------------------------------------
 // Login Attempts (security audit trail)
@@ -383,9 +363,6 @@ export const authAttemptsTable = table(
   ],
 );
 
-export type AuthAttempt = InferSelectModel<typeof authAttemptsTable>;
-export type AuthAttemptInsert = InferInsertModel<typeof authAttemptsTable>;
-
 // ---------------------------------------------------------------------------
 // Referrals
 // ---------------------------------------------------------------------------
@@ -413,9 +390,6 @@ export const referralCodesTable = table(
     t.index("referral_codes_userid_idx").on(tbl.userId),
   ],
 );
-
-export type ReferralCode = InferSelectModel<typeof referralCodesTable>;
-export type ReferralCodeInsert = InferInsertModel<typeof referralCodesTable>;
 
 export const referralTable = table(
   "referrals",
@@ -471,9 +445,6 @@ export const referralTable = table(
   ],
 );
 
-export type Referral = InferSelectModel<typeof referralTable>;
-export type ReferralInsert = InferInsertModel<typeof referralTable>;
-
 // ---------------------------------------------------------------------------
 // Audit Log (immutable append-only trail)
 // ---------------------------------------------------------------------------
@@ -483,13 +454,13 @@ export type ReferralInsert = InferInsertModel<typeof referralTable>;
  * ---------------------------------------------------------------------------
  * This table records every sign-in and security action. At 100k+ users,
  * it will quickly grow to millions of rows, degrading query performance.
- * 
+ *
  * Drizzle ORM does not natively support `PARTITION BY RANGE` schema generation yet.
  * Before going to production, you MUST run a manual SQL migration to partition this table:
- * 
+ *
  * CREATE TABLE auth_audit_log (...) PARTITION BY RANGE (created_at);
  * CREATE TABLE auth_audit_log_y2026m04 PARTITION OF auth_audit_log FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
- * 
+ *
  * Consider using the `pg_partman` PostgreSQL extension to automate creating
  * future monthly partitions.
  * ---------------------------------------------------------------------------
@@ -530,9 +501,6 @@ export const authAuditLogTable = table(
     t.index("auth_audit_log_requestid_idx").on(tbl.requestId),
   ],
 );
-
-export type AuditLog = InferSelectModel<typeof authAuditLogTable>;
-export type AuditLogInsert = InferInsertModel<typeof authAuditLogTable>;
 
 // ---------------------------------------------------------------------------
 // Rate Limits
@@ -576,9 +544,6 @@ export const rateLimitsTable = table(
       .where(sql`blocked_until IS NOT NULL`),
   ],
 );
-
-export type RateLimit = InferSelectModel<typeof rateLimitsTable>;
-export type RateLimitInsert = InferInsertModel<typeof rateLimitsTable>;
 
 // ---------------------------------------------------------------------------
 // User Devices
@@ -625,6 +590,50 @@ export const userDevicesTable = table(
     t.index("user_devices_last_active_idx").on(tbl.lastActiveAt),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Model Types
+// ---------------------------------------------------------------------------
+
+export type User = InferSelectModel<typeof userTable>;
+export type UserInsert = InferInsertModel<typeof userTable>;
+
+export type OtpVerification = InferSelectModel<typeof otpVerificationTable>;
+export type OtpVerificationInsert = InferInsertModel<
+  typeof otpVerificationTable
+>;
+
+export type UserSession = InferSelectModel<typeof userSessionTable>;
+export type UserSessionInsert = InferInsertModel<typeof userSessionTable>;
+
+export type Role = InferSelectModel<typeof rolesTable>;
+export type RoleInsert = InferInsertModel<typeof rolesTable>;
+
+export type Permission = InferSelectModel<typeof permissionsTable>;
+export type PermissionInsert = InferInsertModel<typeof permissionsTable>;
+
+export type RolePermission = InferSelectModel<typeof rolePermissionsTable>;
+export type RolePermissionInsert = InferInsertModel<
+  typeof rolePermissionsTable
+>;
+
+export type UserRole = InferSelectModel<typeof userRolesTable>;
+export type UserRoleInsert = InferInsertModel<typeof userRolesTable>;
+
+export type AuthAttempt = InferSelectModel<typeof authAttemptsTable>;
+export type AuthAttemptInsert = InferInsertModel<typeof authAttemptsTable>;
+
+export type ReferralCode = InferSelectModel<typeof referralCodesTable>;
+export type ReferralCodeInsert = InferInsertModel<typeof referralCodesTable>;
+
+export type Referral = InferSelectModel<typeof referralTable>;
+export type ReferralInsert = InferInsertModel<typeof referralTable>;
+
+export type AuditLog = InferSelectModel<typeof authAuditLogTable>;
+export type AuditLogInsert = InferInsertModel<typeof authAuditLogTable>;
+
+export type RateLimit = InferSelectModel<typeof rateLimitsTable>;
+export type RateLimitInsert = InferInsertModel<typeof rateLimitsTable>;
 
 export type UserDevice = InferSelectModel<typeof userDevicesTable>;
 export type UserDeviceInsert = InferInsertModel<typeof userDevicesTable>;

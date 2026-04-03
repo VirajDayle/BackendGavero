@@ -1,40 +1,16 @@
 /**
- * modules/auth/auth.routes.ts
+ * Routes for the Authentication module.
  *
- * Public vs Protected split:
+ * Public vs Protected Split:
+ * - PUBLIC: No JWT required. Includes OTP request/verify, registration, login, and token refresh.
+ * - PROTECTED: Requires a valid JWT access token and an active session (verified via JTI blacklist).
  *
- * PUBLIC  — no JWT required, anyone can call
- *   /auth/otp/send
- *   /auth/otp/verify
- *   /auth/register
- *   /auth/login/pin
- *   /auth/login/otp
- *   /auth/token/refresh
- *   /pin/reset/request
- *   /pin/reset/confirm
+ * Layer Responsibilities:
+ * - Extract HTTP inputs (body, params, headers, ip, userAgent).
+ * - Enforce rate limits at the infrastructure level.
+ * - Delegate business orchestration to the controller layer.
  *
- * PROTECTED — valid JWT + active session required
- *   /auth/logout
- *   /auth/logout/all
- *   /otp/request
- *   /otp/verify
- *   /pin/set
- *   /users/*
- *   /2fa/*
- *   /sessions/*
- *   /devices/*
- *   /referrals/*
- *   /roles/*
- *   /audit/*
- *
- * Layer rule:
- *   Routes   → extract HTTP inputs (body, params, headers, ip, userAgent)
- *              then delegate to the controller immediately.
- *   Controller → validation/reshaping not covered by TypeBox,
- *               service orchestration, response shaping.
- *   Service  → business logic, DB access.
- *
- * Routes MUST NOT import from auth.service directly.
+ * Security Rule: Routes MUST NOT import from auth.service directly; always use the controller.
  */
 
 import { UAParser } from "ua-parser-js";
@@ -83,6 +59,12 @@ const PaginationQuery = t.Object({
   cursor: t.Optional(t.String()),
 });
 
+/**
+ * Safely parses pagination query parameters into standard numeric values.
+ *
+ * @param query - The raw query object from Elysia.
+ * @returns An object with page, limit, order, and optional cursor.
+ */
 function parsePagination(query: typeof PaginationQuery.static) {
   return {
     page: query.page ?? 1,
@@ -214,6 +196,14 @@ type RequestContext = {
   deviceInfo: DeviceInfo;
 };
 
+/**
+ * Resolves request context information including the client IP and device fingerprint.
+ * Enforces secure IP resolution via TRUST_PROXY configuration.
+ *
+ * @param ctx - Elysia request context.
+ * @returns Request metadata used across controllers and services.
+ */
+
 function resolveRequestContext({
   request,
   server,
@@ -223,9 +213,7 @@ function resolveRequestContext({
 }): RequestContext {
   let ip = server?.requestIP(request)?.address ?? "unknown";
 
-  // FIX: Secure IP extraction. If behind a proxy, we trust the X-Forwarded-For
-  // header only if TRUST_PROXY is enabled. Production environments should
-  // ensure the edge proxy strips any incoming X-Forwarded-For headers from clients.
+  // Enforce secure IP extraction if behind a proxy.
   if (env.TRUST_PROXY) {
     const forwardedFor = request.headers.get("x-forwarded-for");
     if (forwardedFor) {
@@ -254,7 +242,15 @@ function resolveRequestContext({
 // Promotes the optional ctx.user injected by jwtAuthPlugin into a guaranteed
 // actor value. Throws 401 early so route handlers can assume actor is present.
 
-function authenticate(ctx: { user?: AuthUser;[key: string]: unknown }): {
+/**
+ * Middleware adapter that ensures a user is authenticated.
+ * Promotes the optional 'user' context to a guaranteed 'actor' object.
+ *
+ * @param ctx - Context from Elysia (after jwtAuthPlugin).
+ * @returns An object containing the guaranteed authenticated actor.
+ * @throws 401 Unauthorized if no user is found in the context.
+ */
+function authenticate(ctx: { user?: AuthUser; [key: string]: unknown }): {
   actor: AuthUser;
 } {
   if (!ctx.user) throw AuthErrors.Common.unauthorized();
@@ -262,13 +258,14 @@ function authenticate(ctx: { user?: AuthUser;[key: string]: unknown }): {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PUBLIC — no JWT needed
+// PUBLIC ROUTES — No JWT Required
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── 1. Public auth routes ─────────────────────────────────────────────────────
-// These routes handle the initial authentication flow, including OTP delivery,
-// verification, and user registration or login. No JWT is required here.
-
+/**
+ * Public Authentication Routes.
+ * Handles the initial entry points for users: OTP delivery, verification,
+ * registration, login, and refresh token rotation.
+ */
 export const publicAuthRoutes = new Elysia({ prefix: "/auth", tags: ["Auth"] })
   .derive(resolveRequestContext)
 
@@ -422,9 +419,12 @@ export const publicAuthRoutes = new Elysia({ prefix: "/auth", tags: ["Auth"] })
   );
 
 // ── 2. Public PIN routes ──────────────────────────────────────────────────────
-// Used for resetting a forgotten PIN via OTP verification.
-// These are public because the user is locked out and cannot provide a JWT.
 
+/**
+ * Public PIN Management Routes.
+ * Used exclusively for resetting a forgotten PIN via out-of-band OTP verification.
+ * These are public because the user is typically locked out and cannot provide a JWT.
+ */
 export const publicPinRoutes = new Elysia({ prefix: "/pin", tags: ["PIN"] })
   .derive(resolveRequestContext)
 
@@ -463,13 +463,13 @@ export const publicPinRoutes = new Elysia({ prefix: "/pin", tags: ["PIN"] })
   );
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PROTECTED — JWT required
+// PROTECTED ROUTES — JWT & Active Session Required
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── 3. Protected auth routes ──────────────────────────────────────────────────
-// These routes require a valid JWT (Access Token).
-// They handle session management and logging out.
-
+/**
+ * Protected Authentication Routes.
+ * Requires a valid Bearer token. Handles session termination and logout.
+ */
 export const protectedAuthRoutes = new Elysia({
   prefix: "/auth",
   tags: ["Auth"],
@@ -506,6 +506,10 @@ export const protectedAuthRoutes = new Elysia({
 
 // ── 4. Protected PIN routes ───────────────────────────────────────────────────
 
+/**
+ * Protected PIN Management Routes.
+ * Allows authenticated users to set or update their security PIN.
+ */
 export const protectedPinRoutes = new Elysia({ prefix: "/pin", tags: ["PIN"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
@@ -525,8 +529,11 @@ export const protectedPinRoutes = new Elysia({ prefix: "/pin", tags: ["PIN"] })
   );
 
 // ── 5. OTP routes (protected) ─────────────────────────────────────────────────
-// Generic OTP flow for authenticated users (e.g. verifying email or setting 2FA).
 
+/**
+ * Protected OTP Routes.
+ * Generic OTP flow for authenticated users (e.g. verifying email or deactivating account).
+ */
 export const otpRoutes = new Elysia({ prefix: "/otp", tags: ["OTP"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
@@ -557,8 +564,11 @@ export const otpRoutes = new Elysia({ prefix: "/otp", tags: ["OTP"] })
   );
 
 // ── 6. User / profile routes (protected) ─────────────────────────────────────
-// CRUD operations for user profiles and account status.
 
+/**
+ * Protected User profile routes.
+ * Management of user account data and metadata.
+ */
 export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
@@ -668,7 +678,11 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
   );
 
 // ── 7. 2FA routes (protected) ─────────────────────────────────────────────────
-// Management of Time-based One-Time Password (TOTP) two-factor authentication.
+
+/**
+ * Protected Two-Factor Authentication routes.
+ * Management of MFA status for the authenticated account.
+ */
 export const twoFactorRoutes = new Elysia({ prefix: "/2fa", tags: ["2FA"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
@@ -727,8 +741,11 @@ export const twoFactorRoutes = new Elysia({ prefix: "/2fa", tags: ["2FA"] })
   );
 
 // ── 8. Session routes (protected) ─────────────────────────────────────────────
-// View and revoke active login sessions.
 
+/**
+ * Protected Session routes.
+ * View and revoke active login sessions across devices.
+ */
 export const sessionRoutes = new Elysia({
   prefix: "/sessions",
   tags: ["Sessions"],
@@ -758,8 +775,11 @@ export const sessionRoutes = new Elysia({
   );
 
 // ── 9. Device routes (protected) ──────────────────────────────────────────────
-// Manage trusted devices and hardware-level revocation.
 
+/**
+ * Protected Device routes.
+ * Management of hardware fingerprints and device-level trust/revocation.
+ */
 export const deviceRoutes = new Elysia({
   prefix: "/devices",
   tags: ["Devices"],
@@ -816,8 +836,11 @@ export const deviceRoutes = new Elysia({
   );
 
 // ── 10. Referral routes (protected) ───────────────────────────────────────────
-// Tracking and generation of referral codes for user growth.
 
+/**
+ * Protected Referral routes.
+ * Tracking and generation of referral codes.
+ */
 export const referralRoutes = new Elysia({
   prefix: "/referrals",
   tags: ["Referrals"],
@@ -857,8 +880,11 @@ export const referralRoutes = new Elysia({
   );
 
 // ── 11. Role routes (protected — admin only) ──────────────────────────────────
-// RBAC management — creating roles and assigning them to users.
 
+/**
+ * Protected RBAC/Role Management routes.
+ * Creating, assigning, and revoking roles. Most are restricted to administrators.
+ */
 export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
@@ -925,8 +951,11 @@ export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
   );
 
 // ── 12. Audit routes (protected) ──────────────────────────────────────────────
-// Activity logs for security auditing and tracking resource changes.
 
+/**
+ * Protected Audit log routes.
+ * Security auditing and tracking resource changes.
+ */
 export const auditRoutes = new Elysia({ prefix: "/audit", tags: ["Audit"] })
   .use(jwtAuthPlugin)
   .derive(authenticate)
@@ -963,8 +992,10 @@ export const auditRoutes = new Elysia({ prefix: "/audit", tags: ["Audit"] })
     },
   );
 
-// ── Composed plugin ───────────────────────────────────────────────────────────
-
+/**
+ * Composed Authentication Plugin.
+ * Mounts all auth-related sub-routes into the main Elysia application.
+ */
 export const authPlugin = new Elysia({ name: "auth-plugin" })
   // ── Public ──
   .use(publicAuthRoutes)

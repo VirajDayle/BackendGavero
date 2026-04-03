@@ -26,40 +26,38 @@
  *   • "Public" schemas strip sensitive / internal fields before API responses.
  */
 
-import {
-  createInsertSchema,
-  createSelectSchema,
-  createUpdateSchema,
-} from "drizzle-zod";
+// import {
+//   createInsertSchema,
+//   createSelectSchema,
+//   createUpdateSchema,
+// } from "drizzle-zod";
 import { z } from "zod";
 
+// import {
+//   addressesTable,
+//   bankAccountsTable,
+//   customerProfileTable,
+//   deliveryPartnerProfileTable,
+//   kycDocumentsTable,
+//   shopOwnerProfileTable,
+// } from "../../db/schema";
+
 import {
-  addressesTable,
-  bankAccountsTable,
-  customerProfileTable,
-  deliveryPartnerProfileTable,
-  kycDocumentsTable,
-  shopOwnerProfileTable,
-} from "../../db/schema";
+  KYC_DOCUMENT_TYPE,
+  KYC_STATUS,
+  VEHICLE_TYPE,
+  ADDRESS_LABEL,
+  BANK_ACCOUNT_TYPE,
+} from "../../db/shared/enums";
 
-// =============================================================================
-// SHARED PRIMITIVES
-// =============================================================================
+// ========
 
-const uuidSchema = z.string().uuid();
+const uuidSchema = z.uuid();
 
-/**
- * Indian pincodes: exactly 6 digits.
- * varchar(10) in the model accommodates future international expansion.
- */
 const pincodeSchema = z
   .string()
   .regex(/^\d{6}$/, "Pincode must be exactly 6 digits");
-
-/**
- * IFSC: 4 uppercase letters + "0" + 6 alphanumeric = 11 chars.
- * Mirrors the DB check constraint.
- */
+  
 const ifscSchema = z
   .string()
   .length(11)
@@ -68,19 +66,12 @@ const ifscSchema = z
     "IFSC must be 4 uppercase letters + '0' + 6 alphanumeric characters",
   );
 
-/**
- * UPI ID: localpart@provider — loose validation matching NPCI pattern.
- */
 const upiIdSchema = z
   .string()
   .min(3)
   .max(100)
   .regex(/^[a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+$/, "Invalid UPI ID format");
 
-/**
- * Last-4 digits of a bank account number.
- * Mirrors the DB check constraint.
- */
 const last4Schema = z
   .string()
   .length(4)
@@ -94,22 +85,15 @@ const objectStoreKeySchema = z
   .min(1, "Object-store key must not be empty")
   .max(500);
 
-/**
- * ISO 3166-1 alpha-2 country code.
- */
+
 const countryCodeSchema = z
   .string()
   .length(2)
   .transform((v) => v.toUpperCase());
 
-/**
- * ISO 3166-2 state code — up to 3 chars (e.g. "MP", "DL", "MH").
- */
+
 const stateCodeSchema = z.string().min(1).max(3).toUpperCase();
 
-/**
- * IANA timezone string (e.g. "Asia/Kolkata").
- */
 const timezoneSchema = z
   .string()
   .min(1)
@@ -126,25 +110,16 @@ const timezoneSchema = z
     { message: "Invalid IANA timezone" },
   );
 
-/**
- * WGS-84 latitude: −90 to +90.
- */
 const latitudeSchema = z
   .number()
   .min(-90, "Latitude must be ≥ −90")
   .max(90, "Latitude must be ≤ 90");
 
-/**
- * WGS-84 longitude: −180 to +180.
- */
 const longitudeSchema = z
   .number()
   .min(-180, "Longitude must be ≥ −180")
   .max(180, "Longitude must be ≤ 180");
 
-/**
- * Vehicle registration plate — lenient format (India: up to 13 chars).
- */
 const vehicleNumberSchema = z
   .string()
   .min(4)
@@ -155,9 +130,6 @@ const vehicleNumberSchema = z
   )
   .transform((v) => v.toUpperCase());
 
-/**
- * Driving licence number — RTO-issued, up to 20 chars.
- */
 const licenseNumberSchema = z
   .string()
   .min(6)
@@ -165,9 +137,6 @@ const licenseNumberSchema = z
   .regex(/^[A-Z0-9-]+$/i, "Invalid licence number format")
   .transform((v) => v.toUpperCase());
 
-/**
- * Monetary amount in paise — non-negative integer.
- */
 const paisaSchema = z
   .number()
   .int("Amount must be a whole number of paise")
@@ -177,15 +146,7 @@ const paisaSchema = z
 // SECTION 1 — ENUMS
 // =============================================================================
 
-export const kycStatusSchema = z.enum([
-  "not_submitted",
-  "pending",
-  "under_review",
-  "verified",
-  "rejected",
-  "suspended",
-  "expired",
-]);
+export const kycStatusSchema = z.enum(KYC_STATUS);
 export type KycStatus = z.infer<typeof kycStatusSchema>;
 
 export const kycDocumentTypeSchema = z.enum([
@@ -222,8 +183,6 @@ export type AddressLabel = z.infer<typeof addressLabelSchema>;
 
 export const bankAccountTypeSchema = z.enum(["savings", "current", "salary"]);
 export type BankAccountType = z.infer<typeof bankAccountTypeSchema>;
-
-
 
 // =============================================================================
 // SECTION 4 — BANK ACCOUNTS
@@ -323,8 +282,8 @@ export const kycDocumentInsertSchema = createInsertSchema(kycDocumentsTable, {
   selfieImageKey: () => objectStoreKeySchema.optional(),
 }).omit({
   id: true,
-  status: true,         // Always starts as "pending" — set by the model default
-  reviewedBy: true,     // Set by admin review flow, never by the submitting user
+  status: true, // Always starts as "pending" — set by the model default
+  reviewedBy: true, // Set by admin review flow, never by the submitting user
   reviewedAt: true,
   rejectionReason: true,
   verifiedAt: true,
@@ -347,7 +306,8 @@ export const kycDocumentReviewSchema = z
   })
   .refine(
     (d) =>
-      d.status !== "rejected" || (d.rejectionReason !== undefined && d.rejectionReason.length > 0),
+      d.status !== "rejected" ||
+      (d.rejectionReason !== undefined && d.rejectionReason.length > 0),
     {
       message: "rejectionReason is required when status is 'rejected'",
       path: ["rejectionReason"],
@@ -392,17 +352,19 @@ export const addressInsertSchema = createInsertSchema(addressesTable, {
 })
   .omit({
     id: true,
-    shopId: true,        // Server-managed — set when creating shop addresses
-    h3IndexRes7: true,   // Computed from coordinates
-    h3IndexRes9: true,   // Computed from coordinates
-    isDefault: true,     // Managed by service layer to enforce single-default invariant
+    shopId: true, // Server-managed — set when creating shop addresses
+    h3IndexRes7: true, // Computed from coordinates
+    h3IndexRes9: true, // Computed from coordinates
+    isDefault: true, // Managed by service layer to enforce single-default invariant
     isServiceable: true, // Populated async post-geocoding
     deletedAt: true,
     createdAt: true,
     updatedAt: true,
   })
   .refine(
-    (d) => d.label !== "other" || (d.customLabel != null && d.customLabel.length > 0),
+    (d) =>
+      d.label !== "other" ||
+      (d.customLabel != null && d.customLabel.length > 0),
     {
       message: "customLabel is required when label is 'other'",
       path: ["customLabel"],
@@ -423,18 +385,20 @@ export const addressUpdateSchema = createUpdateSchema(addressesTable, {
   .omit({
     id: true,
     userId: true,
-    cityId: true,        // Changing city requires address recreation
-    shopId: true,        // Server-managed — cannot be changed by user
-    h3IndexRes7: true,   // Computed from coordinates
-    h3IndexRes9: true,   // Computed from coordinates
-    isDefault: true,     // Use setDefaultAddress endpoint instead
+    cityId: true, // Changing city requires address recreation
+    shopId: true, // Server-managed — cannot be changed by user
+    h3IndexRes7: true, // Computed from coordinates
+    h3IndexRes9: true, // Computed from coordinates
+    isDefault: true, // Use setDefaultAddress endpoint instead
     isServiceable: true, // Managed async by geocoding service
     deletedAt: true,
     createdAt: true,
     updatedAt: true,
   })
   .refine(
-    (d) => d.label !== "other" || (d.customLabel != null && d.customLabel.length > 0),
+    (d) =>
+      d.label !== "other" ||
+      (d.customLabel != null && d.customLabel.length > 0),
     {
       message: "customLabel is required when label is 'other'",
       path: ["customLabel"],
@@ -481,15 +445,13 @@ export const shopOwnerProfileInsertSchema = createInsertSchema(
     userId: () => uuidSchema,
     businessName: (s) => s.min(1).max(255).optional(),
     businessType: (s) =>
-      z
-        .enum(["sole_proprietorship", "llp", "pvt_ltd", "other"])
-        .optional(),
+      z.enum(["sole_proprietorship", "llp", "pvt_ltd", "other"]).optional(),
     tradeName: (s) => s.min(1).max(255).optional(),
     metadata: () => z.record(z.string(), z.unknown()).optional(),
   },
 ).omit({
   id: true,
-  kycStatus: true,           // Always starts as "not_submitted"
+  kycStatus: true, // Always starts as "not_submitted"
   kycVerifiedAt: true,
   primaryBankAccountId: true,
   isVerified: true,
@@ -508,9 +470,7 @@ export const shopOwnerProfileUpdateSchema = createUpdateSchema(
   {
     businessName: (s) => s.min(1).max(255).optional(),
     businessType: (s) =>
-      z
-        .enum(["sole_proprietorship", "llp", "pvt_ltd", "other"])
-        .optional(),
+      z.enum(["sole_proprietorship", "llp", "pvt_ltd", "other"]).optional(),
     tradeName: (s) => s.min(1).max(255).optional(),
     primaryBankAccountId: () => uuidSchema.optional(),
     metadata: () => z.record(z.string(), z.unknown()).optional(),
@@ -518,10 +478,10 @@ export const shopOwnerProfileUpdateSchema = createUpdateSchema(
 ).omit({
   id: true,
   userId: true,
-  kycStatus: true,       // Managed by background job
+  kycStatus: true, // Managed by background job
   kycVerifiedAt: true,
-  isVerified: true,      // Managed by admin verification flow
-  isSuspended: true,     // Use suspend/unsuspend endpoints
+  isVerified: true, // Managed by admin verification flow
+  isSuspended: true, // Use suspend/unsuspend endpoints
   suspendedAt: true,
   suspensionReason: true,
   createdAt: true,
@@ -540,7 +500,9 @@ export const shopOwnerSuspendSchema = z
     suspensionReason: z.string().min(1).max(500).optional(),
   })
   .refine(
-    (d) => !d.isSuspended || (d.suspensionReason !== undefined && d.suspensionReason.length > 0),
+    (d) =>
+      !d.isSuspended ||
+      (d.suspensionReason !== undefined && d.suspensionReason.length > 0),
     {
       message: "suspensionReason is required when suspending",
       path: ["suspensionReason"],
@@ -577,7 +539,6 @@ export type DeliveryPartnerProfile = z.infer<
 export const deliveryPartnerProfilePublicSchema =
   deliveryPartnerProfileSelectSchema
     .omit({
-
       primaryBankAccountId: true,
       metadata: true,
       isSuspended: true,
@@ -644,18 +605,18 @@ export const deliveryPartnerProfileUpdateSchema = createUpdateSchema(
   userId: true,
   kycStatus: true,
   kycVerifiedAt: true,
-  licenseNumber: true,         // Immutable — changing requires re-verification
+  licenseNumber: true, // Immutable — changing requires re-verification
   licenseExpiresAt: true,
   licenseVerified: true,
   vehicleNumberVerified: true,
   profilePhotoKey: true,
 
-  ratingSum: true,             // Managed by rating service
+  ratingSum: true, // Managed by rating service
   ratingCount: true,
-  totalDeliveries: true,       // Managed by order event handlers
+  totalDeliveries: true, // Managed by order event handlers
   totalEarnings: true,
   lastActiveAt: true,
-  isSuspended: true,           // Use suspend/unsuspend endpoints
+  isSuspended: true, // Use suspend/unsuspend endpoints
   suspendedAt: true,
   suspensionReason: true,
   createdAt: true,
@@ -739,8 +700,8 @@ export const customerProfileInsertSchema = createInsertSchema(
   },
 ).omit({
   id: true,
-  loyaltyPoints: true,   // Managed by loyalty service
-  totalOrders: true,     // Managed by order event handlers
+  loyaltyPoints: true, // Managed by loyalty service
+  totalOrders: true, // Managed by order event handlers
   totalSpend: true,
   lastOrderAt: true,
   createdAt: true,
@@ -757,9 +718,9 @@ export const customerProfileUpdateSchema = createUpdateSchema(
 ).omit({
   id: true,
   userId: true,
-  loyaltyPoints: true,   // Managed by loyalty service
-  referralCodeId: true,  // Immutable after sign-up
-  totalOrders: true,     // Managed by order event handlers
+  loyaltyPoints: true, // Managed by loyalty service
+  referralCodeId: true, // Immutable after sign-up
+  totalOrders: true, // Managed by order event handlers
   totalSpend: true,
   lastOrderAt: true,
   createdAt: true,
@@ -831,7 +792,8 @@ export const kycDocumentSubmitSchema = z
     selfieImageKey: objectStoreKeySchema.optional(),
   })
   .refine(
-    (d) => d.frontImageKey !== undefined || d.documentNumberEncrypted !== undefined,
+    (d) =>
+      d.frontImageKey !== undefined || d.documentNumberEncrypted !== undefined,
     {
       message: "At least a front image or document number must be provided",
       path: ["frontImageKey"],

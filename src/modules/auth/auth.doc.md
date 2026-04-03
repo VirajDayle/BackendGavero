@@ -6,6 +6,19 @@
 
 ### Authentication
 
+The module uses a multi-layered security approach to protect user sessions and prevent abuse.
+
+#### Security & Hardening
+
+1.  **IP Spoofing Protection**: Real client IPs are extracted securely via `X-Forwarded-For` (when `TRUST_PROXY` is on).
+2.  **Refresh Token Rotation**: Every `/auth/token/refresh` call rotates both the storage hash and the client-side token.
+3.  **Reuse Detection**: Attempting to use an old refresh token triggers an immediate revocation of the entire session.
+4.  **JTI Blacklisting**: Access tokens are invalidated globally upon logout or rotation via a Redis-backed JTI blacklist.
+5.  **Fail-Closed Policy**: Security-critical paths (like session validation) fail-closed if dependencies like Redis are unreachable.
+6.  **Brute-Force Protection**: Multi-layered rate limits (IP-based, account-based, and cooldown periods) are enforced on all public endpoints.
+
+#### Headers
+
 Protected routes require a valid JWT in the `Authorization` header:
 
 ```

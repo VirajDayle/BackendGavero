@@ -108,10 +108,26 @@ function applyCursorPagination(
  * Handles profiles, account status (ban/suspend), and security metadata (PIN hashes, failed attempts).
  */
 export class UserRepository {
-  constructor(private readonly db: DB) { }
   /**
-   * Finds a user by their UUID.
-   * By default, filters out soft-deleted accounts.
+   * Initializes the UserRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
+  constructor(private readonly db: DB) { }
+
+  /**
+   * Finds a user by their unique UUID.
+   * By default, it filters out accounts that have been soft-deleted.
+   * 
+   * @param id - The UUID of the user.
+   * @param opts - Query options.
+   * @param opts.includeDeleted - If true, include soft-deleted accounts in search.
+   * @returns The user record if found, otherwise null.
+   */
+  /**
+   * Finds a role by its unique UUID.
+   * 
+   * @param id - The UUID of the role.
+   * @returns The role record, or null.
    */
   async findById(
     id: string,
@@ -129,6 +145,15 @@ export class UserRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a user by their email address.
+   * Efficiently handles lowercase normalization for consistent lookups.
+   * 
+   * @param email - The email address to search for.
+   * @param opts - Query options.
+   * @param opts.includeDeleted - If true, include soft-deleted accounts.
+   * @returns The user record if found, otherwise null.
+   */
   async findByEmail(
     email: string,
     opts: { includeDeleted?: boolean } = {},
@@ -146,7 +171,13 @@ export class UserRepository {
   }
 
   /**
-   * Finds a user by their phone number. Used during registration and login.
+   * Finds a user by their normalized E.164 phone number.
+   * Primary lookup used during the OTP-based registration and login flows.
+   * 
+   * @param phone - The E.164 phone number.
+   * @param opts - Query options.
+   * @param opts.includeDeleted - If true, include soft-deleted accounts.
+   * @returns The user record if found, otherwise null.
    */
   async findByPhone(
     phone: string,
@@ -164,6 +195,18 @@ export class UserRepository {
     return row ?? null;
   }
 
+  /**
+   * Retrieves a paginated list of all active users.
+   * Supports offset-based pagination and cursor-based ordering.
+   * 
+   * @param pagination - Pagination and ordering parameters.
+   * @returns A promise resolving to an object containing items and the total count.
+   */
+  /**
+   * Lists all roles in the system, ordered by name.
+   * 
+   * @returns An array of all role records.
+   */
   async list(
     pagination: Pagination,
   ): Promise<{ items: User[]; total: number }> {
@@ -223,8 +266,12 @@ export class UserRepository {
   }
 
   /**
-   * Sets the `deleted_at` timestamp for a user.
-   * Prevents them from being found by standard repository lookups.
+   * Performs a soft-delete by setting the `deletedAt` timestamp.
+   * This effectively hides the user from standard lookups while preserving data for audit.
+   * 
+   * @param id - The UUID of the user to delete.
+   * @param deletedBy - The ID of the actor performing the deletion.
+   * @returns The updated user record, or null if already deleted.
    */
   async softDelete(id: string, deletedBy: string): Promise<User | null> {
     const [row] = await this.db
@@ -238,6 +285,10 @@ export class UserRepository {
 
   /**
    * Anti-Brute Force: Atomically increments the failed login counter.
+   * Part of the security mechanism to prevent PIN brute-forcing.
+   * 
+   * @param id - The UUID of the user.
+   * @returns The updated number of failed attempts.
    */
   async incrementFailedLogins(id: string): Promise<number> {
     const [row] = await this.db
@@ -252,6 +303,11 @@ export class UserRepository {
     return row?.failedLoginAttempts ?? 0;
   }
 
+  /**
+   * Resets the failed login counter for a user after a successful login.
+   * 
+   * @param id - The UUID of the user.
+   */
   async resetFailedLogins(id: string): Promise<void> {
     await this.db
       .update(userTable)
@@ -262,6 +318,11 @@ export class UserRepository {
 
   /**
    * Anti-Brute Force: Temporarily locks the account from future logins.
+   * Prevents further attempts until the specified timestamp.
+   * 
+   * @param id - The UUID of the user.
+   * @param until - The timestamp when the lock should expire.
+   * @returns The updated user record.
    */
   async lockUntil(id: string, until: Date): Promise<User | null> {
     const [row] = await this.db
@@ -273,6 +334,12 @@ export class UserRepository {
     return row ?? null;
   }
 
+  /**
+   * Marks a user's email as verified and records the timestamp.
+   * 
+   * @param id - The UUID of the user.
+   * @returns The updated user record.
+   */
   async markEmailVerified(id: string): Promise<User | null> {
     const [row] = await this.db
       .update(userTable)
@@ -287,6 +354,12 @@ export class UserRepository {
     return row ?? null;
   }
 
+  /**
+   * Marks a user's phone as verified.
+   * 
+   * @param id - The UUID of the user.
+   * @returns The updated user record.
+   */
   async markPhoneVerified(id: string): Promise<User | null> {
     const [row] = await this.db
       .update(userTable)
@@ -300,6 +373,13 @@ export class UserRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates the `lastLoginAt` and `lastLoginIp` metadata for a user.
+   * 
+   * @param id - The UUID of the user.
+   * @param ip - The client IP address of the most recent login.
+   * @returns The updated user record.
+   */
   async updateLastLogin(id: string, ip: string): Promise<User | null> {
     const [row] = await this.db
       .update(userTable)
@@ -310,6 +390,14 @@ export class UserRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates the user's security PIN hash.
+   * Also updates the `pinChangedAt` timestamp for session invalidation tracking.
+   * 
+   * @param id - The UUID of the user.
+   * @param pinHash - The Argon2/Bcrypt hash of the new 6-digit PIN.
+   * @returns The updated user record.
+   */
   async updatePinHash(id: string, pinHash: string): Promise<User | null> {
     const [row] = await this.db
       .update(userTable)
@@ -334,9 +422,19 @@ export class UserRepository {
  * Handles generation, consumption, and brute-force protection for SMS/Email codes.
  */
 export class OtpRepository {
+  /**
+   * Initializes the OtpRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
-  // Add inside OtpRepository class
+  /**
+   * Atomically increments the attempt counter for an OTP record.
+   * Used to prevent brute-forcing of the 6-digit codes.
+   * 
+   * @param id - The UUID of the OTP record.
+   * @returns The updated attempt count.
+   */
   async incrementAndGetAttempts(id: string): Promise<{ attempts: number }> {
     const [row] = await this.db
       .update(otpVerificationTable)
@@ -349,6 +447,11 @@ export class OtpRepository {
 
   /**
    * Finds a valid, non-expired, and non-consumed OTP by phone number and purpose.
+   * This is the primary lookup during phone-based login and registration.
+   * 
+   * @param phone - The E.164 phone number.
+   * @param purpose - The specific intent of the OTP (e.g., 'phone_verification').
+   * @returns The active OTP record, or null if none exist or it's expired.
    */
   async findActiveByPhone(
     phone: string,
@@ -371,6 +474,13 @@ export class OtpRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a valid, non-expired, and non-consumed OTP by email address.
+   * 
+   * @param email - The user's email address.
+   * @param purpose - The specific intent (e.g., 'email_verification').
+   * @returns The active OTP record, or null.
+   */
   async findActiveByEmail(
     email: string,
     purpose: OtpVerification["purpose"],
@@ -392,6 +502,14 @@ export class OtpRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds an active OTP for a specific user and purpose.
+   * Used for in-app flows like 2FA setup or account deletion.
+   * 
+   * @param userId - The UUID of the authenticated user.
+   * @param purpose - The specific intent (e.g., 'enable_2fa').
+   * @returns The active OTP record, or null.
+   */
   async findActiveByUserAndPurpose(
     userId: string,
     purpose: OtpVerification["purpose"],
@@ -425,6 +543,11 @@ export class OtpRepository {
     return row;
   }
 
+  /**
+   * Increments the attempt counter for an OTP.
+   * 
+   * @param id - The UUID of the OTP record.
+   */
   async incrementAttempts(id: string): Promise<void> {
     await this.db
       .update(otpVerificationTable)
@@ -432,6 +555,12 @@ export class OtpRepository {
       .where(eq(otpVerificationTable.id, id));
   }
 
+  /**
+   * Marks an OTP as verified and sets the verification timestamp.
+   * 
+   * @param id - The UUID of the OTP record.
+   * @returns The updated OTP record, or null.
+   */
   async markVerified(id: string): Promise<OtpVerification | null> {
     const [row] = await this.db
       .update(otpVerificationTable)
@@ -442,6 +571,12 @@ export class OtpRepository {
     return row ?? null;
   }
 
+  /**
+   * Marks an OTP as consumed to prevent reuse.
+   * 
+   * @param id - The UUID of the OTP record.
+   * @returns The updated OTP record, or null.
+   */
   async consume(id: string): Promise<OtpVerification | null> {
     const [row] = await this.db
       .update(otpVerificationTable)
@@ -456,6 +591,9 @@ export class OtpRepository {
    * Atomically marks an OTP as verified AND consumed in a single UPDATE.
    * Prevents the race condition where a crash between markVerified() and
    * consume() could leave an OTP verified but reusable.
+   * 
+   * @param id - The UUID of the OTP record.
+   * @returns The updated OTP record, or null if already consumed.
    */
   async markVerifiedAndConsume(id: string): Promise<OtpVerification | null> {
     const now = new Date();
@@ -475,7 +613,10 @@ export class OtpRepository {
 
   /**
    * Consumes all currently active OTPs for a specific phone and purpose.
-   * Typically called before sending a fresh OTP.
+   * Typically called before sending a fresh OTP to ensure single-active-OTP policy.
+   * 
+   * @param phone - The E.164 phone number.
+   * @param purpose - The specific intent of the OTP.
    */
   async invalidateActiveByPhone(
     phone: string,
@@ -493,6 +634,12 @@ export class OtpRepository {
       );
   }
 
+  /**
+   * Invalidates all active OTPs for a specific user and purpose.
+   * 
+   * @param userId - The UUID of the user.
+   * @param purpose - The specific intent of the OTP.
+   */
   async invalidateActive(
     userId: string,
     purpose: OtpVerification["purpose"],
@@ -519,8 +666,18 @@ export class OtpRepository {
  * Manages token hashes, session status (active/revoked/logged_out), and rotation metadata.
  */
 export class SessionRepository {
+  /**
+   * Initializes the SessionRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a session by its unique UUID.
+   * 
+   * @param id - The UUID of the session.
+   * @returns The session record, or null.
+   */
   async findById(id: string): Promise<UserSession | null> {
     const [row] = await this.db
       .select()
@@ -531,6 +688,13 @@ export class SessionRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a session by the SHA-256 hash of its refresh token.
+   * Used during the `/auth/token/refresh` flow.
+   * 
+   * @param hash - The hex-encoded SHA-256 hash of the refresh token.
+   * @returns The session record, or null.
+   */
   async findByRefreshTokenHash(hash: string): Promise<UserSession | null> {
     const [row] = await this.db
       .select()
@@ -541,6 +705,13 @@ export class SessionRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a session by its associated Access Token JTI (unique identifier).
+   * Used for validating access tokens against the database/Redis blacklist.
+   * 
+   * @param jti - The unique identifier of the access token.
+   * @returns The session record, or null.
+   */
   async findByAccessTokenJti(jti: string): Promise<UserSession | null> {
     const [row] = await this.db
       .select()
@@ -554,6 +725,9 @@ export class SessionRepository {
   /**
    * Retrieves all active, non-expired sessions for a user.
    * Used to show the user their current logins or for mass-revocation.
+   * 
+   * @param userId - The UUID of the user.
+   * @returns An array of active session records.
    */
   async listActiveByUser(userId: string): Promise<UserSession[]> {
     return this.db
@@ -578,6 +752,21 @@ export class SessionRepository {
     return row;
   }
 
+  /**
+   * Updates an existing session record.
+   * 
+   * @param id - The UUID of the session.
+   * @param data - The partial session data to update.
+   * @returns The updated session record, or null.
+   */
+  /**
+   * Updates a custom role definition.
+   * Note: System-managed roles (isSystem: true) cannot be updated.
+   * 
+   * @param id - The UUID of the role.
+   * @param data - The partial data to update.
+   * @returns The updated role record, or null if system-managed or not found.
+   */
   async update(
     id: string,
     data: UserSessionUpdate,
@@ -591,6 +780,11 @@ export class SessionRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates the `lastActiveAt` timestamp for a session to the current time.
+   * 
+   * @param id - The UUID of the session.
+   */
   async touchLastActive(id: string): Promise<void> {
     await this.db
       .update(userSessionTable)
@@ -600,6 +794,11 @@ export class SessionRepository {
 
   /**
    * Admin/System Function: Forces a session into 'revoked' status.
+   * Also blacklists the session's JTI in Redis for immediate invalidation.
+   * 
+   * @param id - The UUID of the session.
+   * @param reason - The reason for revocation (e.g., 'suspicious_activity').
+   * @returns The updated session record, or null.
    */
   async revoke(id: string, reason: string): Promise<UserSession | null> {
     const [row] = await this.db
@@ -615,6 +814,13 @@ export class SessionRepository {
     return row ?? null;
   }
 
+  /**
+   * Revokes all active sessions for a specific user.
+   * Used for security resets or when a user changes their PIN.
+   * 
+   * @param userId - The UUID of the user.
+   * @param reason - The reason for mass revocation.
+   */
   async revokeAllByUser(userId: string, reason: string): Promise<void> {
     const rows = await this.db
       .update(userSessionTable)
@@ -641,6 +847,10 @@ export class SessionRepository {
 
   /**
    * Marks a session as 'logged_out' upon user request.
+   * Blacklists the JTI in Redis to ensure the access token is invalid.
+   * 
+   * @param id - The UUID of the session.
+   * @returns The updated session record, or null.
    */
   async logout(id: string): Promise<UserSession | null> {
     const [row] = await this.db
@@ -665,8 +875,18 @@ export class SessionRepository {
  * Repository for Role definitions (e.g., 'admin', 'customer').
  */
 export class RoleRepository {
+  /**
+   * Initializes the RoleRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a role by its unique UUID.
+   * 
+   * @param id - The UUID of the role.
+   * @returns The role record, or null.
+   */
   async findById(id: string): Promise<Role | null> {
     const [row] = await this.db
       .select()
@@ -677,6 +897,12 @@ export class RoleRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a role by its unique URL-friendly slug (e.g., 'admin').
+   * 
+   * @param slug - The role slug.
+   * @returns The role record, or null.
+   */
   async findBySlug(slug: string): Promise<Role | null> {
     const [row] = await this.db
       .select()
@@ -687,15 +913,34 @@ export class RoleRepository {
     return row ?? null;
   }
 
+  /**
+   * Lists all available roles.
+   * 
+   * @returns An array of all role records.
+   */
   async list(): Promise<Role[]> {
     return this.db.select().from(rolesTable).orderBy(rolesTable.name);
   }
 
+  /**
+   * Creates a new role definition.
+   * 
+   * @param data - The role data to insert.
+   * @returns The created role record.
+   */
   async create(data: RoleInsert): Promise<Role> {
     const [row] = await this.db.insert(rolesTable).values(data).returning();
     return row;
   }
 
+  /**
+   * Updates a custom role definition.
+   * Note: System-managed roles (isSystem: true) cannot be updated.
+   * 
+   * @param id - The UUID of the role.
+   * @param data - The partial data to update.
+   * @returns The updated role record, or null if system-managed or not found.
+   */
   async update(id: string, data: RoleUpdate): Promise<Role | null> {
     const [row] = await this.db
       .update(rolesTable)
@@ -706,6 +951,13 @@ export class RoleRepository {
     return row ?? null;
   }
 
+  /**
+   * Deletes a custom role definition.
+   * Note: System-managed roles (isSystem: true) cannot be deleted.
+   * 
+   * @param id - The UUID of the role.
+   * @returns True if the role was deleted, false otherwise.
+   */
   async delete(id: string): Promise<boolean> {
     const result = await this.db
       .delete(rolesTable)
@@ -723,8 +975,18 @@ export class RoleRepository {
  * Repository for individual Permission nodes (e.g., 'create', 'user').
  */
 export class PermissionRepository {
+  /**
+   * Initializes the PermissionRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a permission by its unique UUID.
+   * 
+   * @param id - The UUID of the permission.
+   * @returns The permission record, or null.
+   */
   async findById(id: string): Promise<Permission | null> {
     const [row] = await this.db
       .select()
@@ -735,6 +997,14 @@ export class PermissionRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a specific permission node by action and resource.
+   * e.g., action='create', resource='user'.
+   * 
+   * @param action - The HTTP-style action.
+   * @param resource - The resource identifier.
+   * @returns The permission record, or null.
+   */
   async findByActionResource(
     action: string,
     resource: string,
@@ -753,6 +1023,11 @@ export class PermissionRepository {
     return row ?? null;
   }
 
+  /**
+   * Lists all available permissions.
+   * 
+   * @returns An array of all permission records.
+   */
   async list(): Promise<Permission[]> {
     return this.db
       .select()
@@ -760,6 +1035,12 @@ export class PermissionRepository {
       .orderBy(permissionsTable.resource, permissionsTable.action);
   }
 
+  /**
+   * Creates a new permission node.
+   * 
+   * @param data - The permission data to insert.
+   * @returns The created permission record.
+   */
   async create(data: PermissionInsert): Promise<Permission> {
     const [row] = await this.db
       .insert(permissionsTable)
@@ -768,6 +1049,12 @@ export class PermissionRepository {
     return row;
   }
 
+  /**
+   * Deletes a permission node.
+   * 
+   * @param id - The UUID of the permission.
+   * @returns True if the permission was deleted, false otherwise.
+   */
   async delete(id: string): Promise<boolean> {
     const result = await this.db
       .delete(permissionsTable)
@@ -785,8 +1072,18 @@ export class PermissionRepository {
  * Repository for Role-to-Permission mappings (the 'Bridge' table).
  */
 export class RolePermissionRepository {
+  /**
+   * Initializes the RolePermissionRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Lists all permissions associated with a specific role.
+   * 
+   * @param roleId - The UUID of the role.
+   * @returns An array of role-permission mappings.
+   */
   async listByRole(roleId: string): Promise<RolePermission[]> {
     return this.db
       .select()
@@ -797,6 +1094,13 @@ export class RolePermissionRepository {
   // FIX: Return type is now Promise<RolePermission | null>.
   // onConflictDoNothing() yields no row on conflict — the old code typed the
   // return as Promise<RolePermission> and returned undefined silently.
+  /**
+   * Assigns a permission to a role.
+   * Uses `onConflictDoNothing` to prevent duplicate mappings.
+   * 
+   * @param data - The role-permission mapping data.
+   * @returns The newly created mapping record, or null if it already exists.
+   */
   async assign(data: RolePermissionInsert): Promise<RolePermission | null> {
     const [row] = await this.db
       .insert(rolePermissionsTable)
@@ -826,11 +1130,21 @@ export class RolePermissionRepository {
 // ---------------------------------------------------------------------------
 
 /**
- * Repository for User-to-Role assignments.
+ * Repository for User-to-Role mappings.
  */
 export class UserRoleRepository {
+  /**
+   * Initializes the UserRoleRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Lists all active roles assigned to a user.
+   * 
+   * @param userId - The UUID of the user.
+   * @returns An array of user-role mappings.
+   */
   async listByUser(userId: string): Promise<UserRole[]> {
     return this.db
       .select()
@@ -849,6 +1163,9 @@ export class UserRoleRepository {
   /**
    * Retrieves the raw list of role slugs assigned to a user.
    * Primarily used for JWT payload construction.
+   * 
+   * @param userId - The UUID of the user.
+   * @returns An array of objects containing the role slug.
    */
   async findByUserId(userId: string): Promise<{ roleSlug: string }[]> {
     return this.db
@@ -868,9 +1185,12 @@ export class UserRoleRepository {
       );
   }
 
-  // FIX: Return type is now Promise<UserRole | null>.
-  // onConflictDoNothing() yields no row on conflict — the old code returned
-  // undefined while typed as Promise<UserRole>, causing silent type lies.
+  /**
+   * Assigns a role to a user.
+   * 
+   * @param data - The user-role mapping data.
+   * @returns The newly created mapping, or null if it already exists.
+   */
   async assign(data: UserRoleInsert): Promise<UserRole | null> {
     const [row] = await this.db
       .insert(userRolesTable)
@@ -881,6 +1201,14 @@ export class UserRoleRepository {
     return row ?? null;
   }
 
+  /**
+   * Revokes a role from a user.
+   * 
+   * @param userId - The UUID of the user.
+   * @param roleId - The UUID of the role.
+   * @param shopId - Optional shop context for the role assignment.
+   * @returns True if the mapping was deleted, false otherwise.
+   */
   async revoke(
     userId: string,
     roleId: string,
@@ -912,8 +1240,18 @@ export class UserRoleRepository {
  * Primarily used for security monitoring and brute-force detection.
  */
 export class AuthAttemptRepository {
+  /**
+   * Initializes the AuthAttemptRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Creates a new authentication attempt record.
+   * 
+   * @param data - The auth attempt data to insert.
+   * @returns The newly created record.
+   */
   async create(data: AuthAttemptInsert): Promise<AuthAttempt> {
     const [row] = await this.db
       .insert(authAttemptsTable)
@@ -923,6 +1261,13 @@ export class AuthAttemptRepository {
     return row;
   }
 
+  /**
+   * Counts recent failed login attempts by IP address.
+   * 
+   * @param ip - The IP address to check.
+   * @param windowMinutes - The time window in minutes.
+   * @returns The count of failed attempts.
+   */
   async countRecentFailuresByIp(
     ip: string,
     windowMinutes: number,
@@ -943,6 +1288,13 @@ export class AuthAttemptRepository {
     return row?.count ?? 0;
   }
 
+  /**
+   * Counts recent failed login attempts by User ID.
+   * 
+   * @param userId - The UUID of the user.
+   * @param windowMinutes - The time window in minutes.
+   * @returns The count of failed attempts.
+   */
   async countRecentFailuresByUser(
     userId: string,
     windowMinutes: number,
@@ -963,6 +1315,13 @@ export class AuthAttemptRepository {
     return row?.count ?? 0;
   }
 
+  /**
+   * Counts recent failed login attempts by phone number.
+   * 
+   * @param phone - The phone number to check.
+   * @param windowMinutes - The time window in minutes.
+   * @returns The count of failed attempts.
+   */
   async countRecentFailuresByPhone(
     phone: string,
     windowMinutes: number,
@@ -983,6 +1342,13 @@ export class AuthAttemptRepository {
     return row?.count ?? 0;
   }
 
+  /**
+   * Lists authentication attempts for a user with pagination.
+   * 
+   * @param userId - The UUID of the user.
+   * @param pagination - Pagination settings.
+   * @returns An array of auth attempt records.
+   */
   async listByUser(
     userId: string,
     pagination: Pagination,
@@ -1017,8 +1383,18 @@ export class AuthAttemptRepository {
  * Repository for Referral Codes (the codes shared by users).
  */
 export class ReferralCodeRepository {
+  /**
+   * Initializes the ReferralCodeRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a referral code by its string representation.
+   * 
+   * @param code - The referral code string.
+   * @returns The referral code record, or null.
+   */
   async findByCode(code: string): Promise<ReferralCode | null> {
     const [row] = await this.db
       .select()
@@ -1029,6 +1405,12 @@ export class ReferralCodeRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds an active referral code by its unique string (e.g., 'REF123').
+   * 
+   * @param code - The Alphanumeric referral code.
+   * @returns The referral code record, or null if expired or not found.
+   */
   async findActiveByCode(code: string): Promise<ReferralCode | null> {
     const [row] = await this.db
       .select()
@@ -1052,6 +1434,12 @@ export class ReferralCodeRepository {
     return row ?? null;
   }
 
+  /**
+   * Retrieves the referral code assigned to a specific user.
+   * 
+   * @param userId - The UUID of the user.
+   * @returns The referral code record, or null.
+   */
   async findByUserId(userId: string): Promise<ReferralCode | null> {
     const [row] = await this.db
       .select()
@@ -1062,6 +1450,12 @@ export class ReferralCodeRepository {
     return row ?? null;
   }
 
+  /**
+   * Creates a new referral code for a user.
+   * 
+   * @param data - The referral code data to insert.
+   * @returns The newly created record.
+   */
   async create(data: ReferralCodeInsert): Promise<ReferralCode> {
     const [row] = await this.db
       .insert(referralCodesTable)
@@ -1071,6 +1465,11 @@ export class ReferralCodeRepository {
     return row;
   }
 
+  /**
+   * Atomically increments the usage counter for a referral code.
+   * 
+   * @param id - The UUID of the referral code.
+   */
   async incrementUsage(id: string): Promise<void> {
     await this.db
       .update(referralCodesTable)
@@ -1078,6 +1477,11 @@ export class ReferralCodeRepository {
       .where(eq(referralCodesTable.id, id));
   }
 
+  /**
+   * Deactivates a referral code.
+   * 
+   * @param id - The UUID of the referral code.
+   */
   async deactivate(id: string): Promise<void> {
     await this.db
       .update(referralCodesTable)
@@ -1090,8 +1494,18 @@ export class ReferralCodeRepository {
  * Repository for Referral instances (the actual link between referee and referrer).
  */
 export class ReferralRepository {
+  /**
+   * Initializes the ReferralRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a referral record by the referee's user ID.
+   * 
+   * @param refereeId - The UUID of the referee.
+   * @returns The referral record, or null.
+   */
   async findByReferee(refereeId: string): Promise<Referral | null> {
     const [row] = await this.db
       .select()
@@ -1102,6 +1516,13 @@ export class ReferralRepository {
     return row ?? null;
   }
 
+  /**
+   * Lists all referrals made by a specific referrer.
+   * 
+   * @param referrerId - The UUID of the referrer.
+   * @param pagination - Pagination settings.
+   * @returns An object containing the list of referrals and the total count.
+   */
   async listByReferrer(
     referrerId: string,
     pagination: Pagination,
@@ -1139,11 +1560,24 @@ export class ReferralRepository {
     return { items, total: countRow?.count ?? 0 };
   }
 
+  /**
+   * Creates a new referral record.
+   * 
+   * @param data - The referral data to insert.
+   * @returns The created referral record.
+   */
   async create(data: ReferralInsert): Promise<Referral> {
     const [row] = await this.db.insert(referralTable).values(data).returning();
     return row;
   }
 
+  /**
+   * Updates a referral record.
+   * 
+   * @param id - The UUID of the referral.
+   * @param data - The partial data to update.
+   * @returns The updated referral record, or null.
+   */
   async update(id: string, data: ReferralUpdate): Promise<Referral | null> {
     const [row] = await this.db
       .update(referralTable)
@@ -1160,8 +1594,18 @@ export class ReferralRepository {
  * Tracks events like account creation, status changes, and role assignments.
  */
 export class AuditLogRepository {
+  /**
+   * Initializes the AuditLogRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Creates a new audit log entry.
+   * 
+   * @param data - The audit log data to insert.
+   * @returns The created audit log record.
+   */
   async create(data: AuditLogInsert): Promise<AuditLog> {
     const [row] = await this.db
       .insert(authAuditLogTable)
@@ -1184,6 +1628,13 @@ export class AuditLogRepository {
     return row as unknown as AuditLog;
   }
 
+  /**
+   * Lists audit logs filtered by the actor who performed the action.
+   * 
+   * @param actorId - The UUID of the actor.
+   * @param pagination - Pagination settings.
+   * @returns An object containing the list of logs and the total count.
+   */
   async listByActor(
     actorId: string,
     pagination: Pagination,
@@ -1234,6 +1685,14 @@ export class AuditLogRepository {
     return { items: items as unknown as AuditLog[], total: countRow?.count ?? 0 };
   }
 
+  /**
+   * Lists audit logs filtered by the resource affected.
+   * 
+   * @param resource - The resource type.
+   * @param resourceId - The UUID of the resource.
+   * @param pagination - Pagination settings.
+   * @returns An object containing the list of logs and the total count.
+   */
   async listByResource(
     resource: string,
     resourceId: string,
@@ -1288,6 +1747,14 @@ export class AuditLogRepository {
     return { items: items as unknown as AuditLog[], total: countRow?.count ?? 0 };
   }
 
+  /**
+   * Lists audit logs within a specific time range.
+   * 
+   * @param from - Start date.
+   * @param to - End date.
+   * @param pagination - Pagination settings.
+   * @returns An array of audit log records.
+   */
   async listByTimeRange(
     from: Date,
     to: Date,
@@ -1333,8 +1800,19 @@ export class AuditLogRepository {
  * Supports flexible window sizes and blocking logic.
  */
 export class RateLimitRepository {
+  /**
+   * Initializes the RateLimitRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a rate limit record by key and action.
+   * 
+   * @param key - The identifier (e.g., IP or User ID).
+   * @param action - The action being rate limited.
+   * @returns The rate limit record, or null.
+   */
   async findByKeyAndAction(
     key: string,
     action: string,
@@ -1350,6 +1828,12 @@ export class RateLimitRepository {
     return row ?? null;
   }
 
+  /**
+   * Upserts a rate limit record.
+   * 
+   * @param data - The rate limit data to insert or update.
+   * @returns The rate limit record.
+   */
   async upsert(data: RateLimitInsert): Promise<RateLimit> {
     const [row] = await this.db
       .insert(rateLimitsTable)
@@ -1367,6 +1851,13 @@ export class RateLimitRepository {
     return row;
   }
 
+  /**
+   * Updates a rate limit record.
+   * 
+   * @param id - The UUID of the rate limit record.
+   * @param data - The partial data to update.
+   * @returns The updated rate limit record, or null.
+   */
   async update(id: string, data: RateLimitUpdate): Promise<RateLimit | null> {
     const [row] = await this.db
       .update(rateLimitsTable)
@@ -1377,6 +1868,12 @@ export class RateLimitRepository {
     return row ?? null;
   }
 
+  /**
+   * Blocks a rate limit key until a specific time.
+   * 
+   * @param id - The UUID of the rate limit record.
+   * @param until - The date until which the key is blocked.
+   */
   async block(id: string, until: Date): Promise<void> {
     await this.db
       .update(rateLimitsTable)
@@ -1384,6 +1881,12 @@ export class RateLimitRepository {
       .where(eq(rateLimitsTable.id, id));
   }
 
+  /**
+   * Resets the rate limit counters for a key and action.
+   * 
+   * @param key - The identifier.
+   * @param action - The action.
+   */
   async reset(key: string, action: string): Promise<void> {
     await this.db
       .update(rateLimitsTable)
@@ -1393,6 +1896,11 @@ export class RateLimitRepository {
       );
   }
 
+  /**
+   * Deletes all expired rate limit records.
+   * 
+   * @returns The number of deleted records.
+   */
   async deleteExpired(): Promise<number> {
     const result = await this.db
       .delete(rateLimitsTable)
@@ -1404,6 +1912,11 @@ export class RateLimitRepository {
   /**
    * High-level rate limit check.
    * Increments the counter and returns true if the limit is exceeded.
+   * 
+   * @param key - The identifier.
+   * @param action - The action.
+   * @param opts - Configuration for max attempts and window size.
+   * @returns True if rate limited, false otherwise.
    */
   async checkAndIncrement(
     key: string,
@@ -1469,8 +1982,19 @@ export class RateLimitRepository {
  * Repository for tracking hardware devices associated with user accounts.
  */
 export class UserDeviceRepository {
+  /**
+   * Initializes the UserDeviceRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a device by user ID and fingerprint.
+   * 
+   * @param userId - The UUID of the user.
+   * @param fingerprint - The device fingerprint string.
+   * @returns The user device record, or null.
+   */
   async findByFingerprint(
     userId: string,
     fingerprint: string,
@@ -1489,6 +2013,12 @@ export class UserDeviceRepository {
     return row ?? null;
   }
 
+  /**
+   * Lists all devices associated with a user.
+   * 
+   * @param userId - The UUID of the user.
+   * @returns An array of user device records.
+   */
   async listByUser(userId: string): Promise<UserDevice[]> {
     return this.db
       .select()
@@ -1497,6 +2027,12 @@ export class UserDeviceRepository {
       .orderBy(desc(userDevicesTable.lastActiveAt));
   }
 
+  /**
+   * Upserts a user device record.
+   * 
+   * @param data - The user device data to insert or update.
+   * @returns The user device record.
+   */
   async upsert(data: UserDeviceInsert): Promise<UserDevice> {
     const [row] = await this.db
       .insert(userDevicesTable)
@@ -1515,6 +2051,13 @@ export class UserDeviceRepository {
     return row;
   }
 
+  /**
+   * Updates a user device record.
+   * 
+   * @param id - The UUID of the device.
+   * @param data - The partial data to update.
+   * @returns The updated user device record, or null.
+   */
   async update(id: string, data: UserDeviceUpdate): Promise<UserDevice | null> {
     const [row] = await this.db
       .update(userDevicesTable)
@@ -1525,6 +2068,12 @@ export class UserDeviceRepository {
     return row ?? null;
   }
 
+  /**
+   * Sets the trusted status of a device.
+   * 
+   * @param id - The UUID of the device.
+   * @param trusted - Whether the device is trusted.
+   */
   async setTrusted(id: string, trusted: boolean): Promise<void> {
     await this.db
       .update(userDevicesTable)
@@ -1532,6 +2081,13 @@ export class UserDeviceRepository {
       .where(eq(userDevicesTable.id, id));
   }
 
+  /**
+   * Revokes a device session.
+   * 
+   * @param id - The UUID of the device.
+   * @param userId - The UUID of the user.
+   * @returns True if the device was revoked, false otherwise.
+   */
   async revoke(id: string, userId: string): Promise<boolean> {
     const result = await this.db
       .update(userDevicesTable)

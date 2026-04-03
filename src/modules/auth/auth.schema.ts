@@ -1,18 +1,15 @@
 /**
- * auth.schema.ts
- *
- * FIXES APPLIED:
- *  - userSessionSelectSchema: refreshTokenHash max length updated to 64
- *    (SHA-256 hex = 64 chars). The model column was also updated from 255
- *    to 64 to match. Previously sized for argon2 output which is no longer
- *    used for refresh tokens.
- *
- * All other schemas are unchanged — they were correct as written.
- * The cross-field refines on setPinSchema and resetPinSchema are still here
- * and remain useful for any callers that do validate through Zod directly
- * (e.g. tests, CLI scripts). The service layer adds its own imperative checks
- * since TypeBox in routes does not run Zod refines.
+ * Zod schemas for the Authentication module.
+ * 
+ * Purpose:
+ * - Documentation and Type Generation: Provides standard types for services/repos.
+ * - Runtime Validation: Used by tests, CLI tools, and the service layer for complex 
+ *   refinements (e.g. cross-field checks) not supported by TypeBox in the route layer.
+ * 
+ * Note: The route layer uses TypeBox (in .routes.ts) for high-performance HTTP validation.
  */
+
+
 
 import { z } from "zod";
 import { isIP } from "node:net";
@@ -28,9 +25,6 @@ import {
   USER_ROLES,
 } from "../../db/shared/enums";
 
-// ---------------------------------------------------------------------------
-// Shared primitives
-// ---------------------------------------------------------------------------
 const uuidSchema = z.uuid();
 
 const e164Phone = z
@@ -48,10 +42,6 @@ const countryCodeSchema = z
   .string()
   .length(2)
   .transform((v) => v.toUpperCase());
-
-// ---------------------------------------------------------------------------
-// 1. Enums
-// ---------------------------------------------------------------------------
 
 export const rewardStatusSchema = z.enum(REWARD_STATUSES);
 export type RewardStatus = z.infer<typeof rewardStatusSchema>;
@@ -81,10 +71,14 @@ export type UserRole = z.infer<typeof userRoleSchema>;
 // 2. Users
 // ---------------------------------------------------------------------------
 
+/**
+ * Standard public user profile object.
+ * Strips sensitive internal fields like password hashes or salt.
+ */
 export const userPublicSchema = z.object({
   id: uuidSchema,
   name: z.string().min(1).max(255).nullable(),
-  email: z.string().email("Invalid email address").nullable(),
+  email: z.email("Invalid email address").nullable(),
   emailVerified: z.boolean(),
   phone: e164Phone,
   twoFactorEnabled: z.boolean(),
@@ -95,8 +89,10 @@ export const userPublicSchema = z.object({
 export type UserPublic = z.infer<typeof userPublicSchema>;
 
 /**
- * Maps a database user row to the public user response shape.
- * Used instead of Zod parsing on hot paths to avoid validation overhead.
+ * Maps a raw Drizzle User record to the sanitized UserPublic type.
+ * 
+ * @param user - The raw database user record.
+ * @returns A sanitized public user profile.
  */
 export function mapToUserPublic(user: User): UserPublic {
   return {
@@ -133,7 +129,7 @@ export const otpVerifySchema = z
     purpose: otpPurposeSchema,
     otp: z.string().min(4).max(8).regex(/^\d+$/, "OTP must be numeric"),
     phone: e164Phone.optional(),
-    email: z.string().email().optional(),
+    email: z.email().optional(),
   })
   .refine((d) => d.phone ?? d.email, {
     message: "Either phone or email must be provided",
@@ -141,38 +137,9 @@ export const otpVerifySchema = z
   });
 export type OtpVerify = z.infer<typeof otpVerifySchema>;
 
-// ---------------------------------------------------------------------------
-// 4. User Sessions
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 5. Roles & Permissions (RBAC)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 6. Auth Attempts
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 7. Referrals
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 8. Audit Log
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 9. Rate Limits
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 10. User Devices
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 11. Composite / helper schemas
-// ---------------------------------------------------------------------------
-
+/**
+ * Extended user profile including assigned roles and permissions.
+ */
 export const userWithRolesSchema = userPublicSchema.extend({
   roles: z.array(
     z.object({
@@ -180,7 +147,7 @@ export const userWithRolesSchema = userPublicSchema.extend({
       name: z.string(),
       slug: z.string(),
       shopId: uuidSchema.nullable(),
-      expiresAt: z.string().datetime({ offset: true }).nullable(),
+      expiresAt: z.iso.datetime({ offset: true }).nullable(),
     }),
   ),
 });
@@ -211,6 +178,7 @@ export const registerRequestSchema = z.object({
     .regex(/^[A-Z0-9]+$/)
     .optional(),
 });
+
 export type RegisterRequest = z.infer<typeof registerRequestSchema>;
 
 export const loginWithPinSchema = z.object({
@@ -279,3 +247,4 @@ export const paginationSchema = z.object({
   order: z.enum(["asc", "desc"]).default("desc"),
 });
 export type Pagination = z.infer<typeof paginationSchema>;
+

@@ -74,7 +74,7 @@ export const userRoleEnum = pgEnum("user_role", USER_ROLES);
 // PROFILE ENUMS
 // =============================================================================
 
-export const kycStatusEnum = pgEnum("kyc_status", [
+export const KYC_STATUS = [
   "not_submitted",
   "pending",
   "under_review",
@@ -82,9 +82,10 @@ export const kycStatusEnum = pgEnum("kyc_status", [
   "rejected",
   "suspended",
   "expired",
-]);
+] as const;
+export const kycStatusEnum = pgEnum("kyc_status", KYC_STATUS);
 
-export const kycDocumentTypeEnum = pgEnum("kyc_document_type", [
+export const KYC_DOCUMENT_TYPE = [
   "aadhaar",
   "pan",
   "passport",
@@ -93,9 +94,13 @@ export const kycDocumentTypeEnum = pgEnum("kyc_document_type", [
   "gst_certificate",
   "business_registration",
   "bank_statement",
-]);
+] as const;
+export const kycDocumentTypeEnum = pgEnum(
+  "kyc_document_type",
+  KYC_DOCUMENT_TYPE,
+);
 
-export const vehicleTypeEnum = pgEnum("vehicle_type", [
+export const VEHICLE_TYPE = [
   "bicycle",
   "motorcycle",
   "car",
@@ -103,21 +108,23 @@ export const vehicleTypeEnum = pgEnum("vehicle_type", [
   "van",
   "truck",
   "other",
-]);
+] as const;
+export const vehicleTypeEnum = pgEnum("vehicle_type", VEHICLE_TYPE);
 
-export const addressLabelEnum = pgEnum("address_label", [
+export const ADDRESS_LABEL = [
   "home",
   "work",
   "office",
   "hotel",
   "other",
-]);
+] as const;
+export const addressLabelEnum = pgEnum("address_label", ADDRESS_LABEL);
 
-export const bankAccountTypeEnum = pgEnum("bank_account_type", [
-  "savings",
-  "current",
-  "salary",
-]);
+export const BANK_ACCOUNT_TYPE = ["savings", "current", "salary"] as const;
+export const bankAccountTypeEnum = pgEnum(
+  "bank_account_type",
+  BANK_ACCOUNT_TYPE,
+);
 
 // =============================================================================
 // PLATFORM ENUMS
@@ -477,10 +484,7 @@ export const stockStatusEnum = pgEnum("stock_status", [
   "discontinued",
 ]);
 
-export const productSourceEnum = pgEnum("product_source", [
-  "master",
-  "custom",
-]);
+export const productSourceEnum = pgEnum("product_source", ["master", "custom"]);
 
 export const productRecommendationBadgeEnum = pgEnum(
   "product_recommendation_badge",
@@ -506,10 +510,7 @@ export const collectionTypeEnum = pgEnum("collection_type", [
   "trending",
 ]);
 
-export const bundleTypeEnum = pgEnum("bundle_type", [
-  "flexible",
-  "fixed",
-]);
+export const bundleTypeEnum = pgEnum("bundle_type", ["flexible", "fixed"]);
 
 export const bundlePricingTypeEnum = pgEnum("bundle_pricing_type", [
   "fixed_price",
@@ -662,16 +663,19 @@ export const answeredByEnum = pgEnum("answered_by", [
   "verified_buyer",
 ]);
 
-export const catalogueAnnouncementTypeEnum = pgEnum("catalogue_announcement_type", [
-  "general",
-  "promotion",
-  "new_arrival",
-  "restock",
-  "holiday",
-  "urgent",
-  "maintenance",
-  "policy_update",
-]);
+export const catalogueAnnouncementTypeEnum = pgEnum(
+  "catalogue_announcement_type",
+  [
+    "general",
+    "promotion",
+    "new_arrival",
+    "restock",
+    "holiday",
+    "urgent",
+    "maintenance",
+    "policy_update",
+  ],
+);
 
 export const displayLocationEnum = pgEnum("display_location", [
   "shop_header",
@@ -757,23 +761,26 @@ export const reviewActionEnum = pgEnum("review_action", [
   "request_more_info",
 ]);
 
-export const catalogueRecommendationTypeEnum = pgEnum("catalogue_recommendation_type", [
-  "personalized_homepage",
-  "similar_products",
-  "frequently_bought_together",
-  "complementary_items",
-  "trending_for_you",
-  "complete_the_look",
-  "you_may_also_like",
-  "recently_viewed",
-  "abandoned_cart",
-  "seasonal",
-  "price_drop_alert",
-  "restock_alert",
-  "upsell",
-  "cross_sell",
-  "bundle_suggestion",
-]);
+export const catalogueRecommendationTypeEnum = pgEnum(
+  "catalogue_recommendation_type",
+  [
+    "personalized_homepage",
+    "similar_products",
+    "frequently_bought_together",
+    "complementary_items",
+    "trending_for_you",
+    "complete_the_look",
+    "you_may_also_like",
+    "recently_viewed",
+    "abandoned_cart",
+    "seasonal",
+    "price_drop_alert",
+    "restock_alert",
+    "upsell",
+    "cross_sell",
+    "bundle_suggestion",
+  ],
+);
 
 export const recommendationStatusEnum = pgEnum("recommendation_status_v2", [
   "generated",
@@ -1123,12 +1130,10 @@ export const disputeStatusEnum = pgEnum("dispute_status", [
   "accepted",
 ]);
 
-export const giftCardTransactionTypeEnum = pgEnum("gift_card_transaction_type", [
-  "redemption",
-  "refund",
-  "adjustment",
-  "activation",
-]);
+export const giftCardTransactionTypeEnum = pgEnum(
+  "gift_card_transaction_type",
+  ["redemption", "refund", "adjustment", "activation"],
+);
 
 // =============================================================================
 // COMMS & SYSTEM ENUMS
@@ -1432,14 +1437,7 @@ export const gstTransactionTypeEnum = pgEnum("gst_transaction_type", [
 
 export const platformFeePaymentStatusEnum = pgEnum(
   "platform_fee_payment_status",
-  [
-    "pending",
-    "paid",
-    "overdue",
-    "waived",
-    "failed",
-    "refunded",
-  ],
+  ["pending", "paid", "overdue", "waived", "failed", "refunded"],
 );
 
 export const commissionScopeEnum = pgEnum("commission_scope", [
@@ -1449,10 +1447,16 @@ export const commissionScopeEnum = pgEnum("commission_scope", [
   "shop",
 ]);
 
-
 export const platformAnnouncementTypeEnum = pgEnum(
   "platform_announcement_type",
-  ["general", "feature_launch", "policy_update", "maintenance", "promotion", "urgent"],
+  [
+    "general",
+    "feature_launch",
+    "policy_update",
+    "maintenance",
+    "promotion",
+    "urgent",
+  ],
 );
 
 export const staticPageTargetEnum = pgEnum("static_page_target", [

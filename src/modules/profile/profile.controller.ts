@@ -7,7 +7,6 @@
  */
 
 import type { AuthUser } from "../../middleware/auth.middleware";
-import { PlatformErrors } from "../platform/platform.errors";
 
 import {
   BankAccountService,
@@ -18,11 +17,6 @@ import {
   CustomerService,
   CompositeProfileService,
 } from "./profile.service";
-
-import {
-  CityService,
-  PincodeService,
-} from "../platform/platform.service";
 
 // ── Context type ──────────────────────────────────────────────────────────────
 // Subset of the Elysia context relevant to controllers.

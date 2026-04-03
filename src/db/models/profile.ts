@@ -1,7 +1,6 @@
-import { pgTable as table } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
 import * as t from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
+import { pgTable as table } from "drizzle-orm/pg-core";
+import { type InferInsertModel, type InferSelectModel, sql } from "drizzle-orm";
 import { userTable } from "./auth";
 import { citiesTable, serviceablePincodesTable } from "./location";
 import { geographyPoint } from "../shared/types";
@@ -554,3 +553,24 @@ export const customerProfileTable = table(
   ],
 );
 
+// =============================================================================
+// Model Types
+// =============================================================================
+
+export type BankAccount = InferSelectModel<typeof bankAccountsTable>;
+export type BankAccountInsert = InferInsertModel<typeof bankAccountsTable>;
+
+export type KycDocument = InferSelectModel<typeof kycDocumentsTable>;
+export type KycDocumentInsert = InferInsertModel<typeof kycDocumentsTable>;
+
+export type Address = InferSelectModel<typeof addressesTable>;
+export type AddressInsert = InferInsertModel<typeof addressesTable>;
+
+export type ShopOwnerProfile = InferSelectModel<typeof shopOwnerProfileTable>;
+export type ShopOwnerProfileInsert = InferInsertModel<typeof shopOwnerProfileTable>;
+
+export type DeliveryPartnerProfile = InferSelectModel<typeof deliveryPartnerProfileTable>;
+export type DeliveryPartnerProfileInsert = InferInsertModel<typeof deliveryPartnerProfileTable>;
+
+export type CustomerProfile = InferSelectModel<typeof customerProfileTable>;
+export type CustomerProfileInsert = InferInsertModel<typeof customerProfileTable>;

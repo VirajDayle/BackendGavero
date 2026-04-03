@@ -1,12 +1,13 @@
 /**
- * modules/auth/notification.service.ts
- *
- * Delivery pipe for OTP messages.
- * OTP generation, hashing, storage, and verification are all in auth.service.ts.
- * This file only delivers an already-generated OTP string to the user.
- *
- * Provider is selected via SMS_PROVIDER / EMAIL_PROVIDER env vars.
- * If unset (development), OTP is logged to console.
+ * Service for delivering One-Time Passwords (OTP) via SMS and Email.
+ * 
+ * Responsibilities:
+ * - Select the appropriate delivery provider (e.g. Twilio, SendGrid, Resend) based on env config.
+ * - Format the message content for the user.
+ * - Handle HTTP communication with provider APIs.
+ * 
+ * Note: This service only handles delivery. OTP generation, hashing, and 
+ * verification logic resides in `auth.service.ts`.
  */
 
 import { env } from "../../config/env";
@@ -36,12 +37,15 @@ async function post<T>(
   }
 }
 
-// ── NotificationService ───────────────────────────────────────────────────────
-
+/**
+ * Abstract utility service for dispatching security notifications.
+ */
 export abstract class NotificationService {
   /**
-   * Send OTP via SMS.
-   * Called from: AuthService.sendOtp(), PinService.requestReset()
+   * Dispatches a 6-digit OTP to a mobile phone number via SMS.
+   * 
+   * @param phone - E.164 formatted phone number.
+   * @param otp - The 6-digit numeric string.
    */
   static async sendSms(phone: string, otp: string): Promise<void> {
     switch (env.SMS_PROVIDER) {
@@ -63,8 +67,10 @@ export abstract class NotificationService {
   }
 
   /**
-   * Send OTP via Email.
-   * Called from: OtpService.request() when purpose targets an email
+   * Dispatches a verification code to a user's email address.
+   * 
+   * @param email - Valid email address.
+   * @param otp - The 6-digit numeric string.
    */
   static async sendEmail(email: string, otp: string): Promise<void> {
     const subject = "Your OTP Code";
@@ -83,8 +89,10 @@ export abstract class NotificationService {
   }
 
   /**
-   * Sends to phone, email, or both depending on what is provided.
-   * Called from: OtpService.request()
+   * Orchestrates delivery to all available contact methods in the target object.
+   * 
+   * @param target - Object containing optional phone and email.
+   * @param otp - The OTP code to send.
    */
   static async send(
     target: { phone?: string | null; email?: string | null },
