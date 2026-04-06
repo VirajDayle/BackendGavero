@@ -13,11 +13,9 @@
  * Security Rule: Routes MUST NOT import from auth.service directly; always use the controller.
  */
 
-import { UAParser } from "ua-parser-js";
-
 import { Elysia, t } from "elysia";
-
 import { jwtAuthPlugin } from "../../middleware/auth.middleware";
+import { rbacGuard, rbacPlugin } from "../../middleware/rbac.middleware";
 
 import {
   AuthController,
@@ -32,13 +30,10 @@ import {
   UserController,
 } from "./auth.controller";
 
-import type { AuthUser } from "../../middleware/auth.middleware";
 import { rateLimit } from "../../middleware/rateLimit.middleware";
 import { env } from "../../config/env";
-import { AuthErrors } from "./auth.errors";
 import {
   UUIDParam,
-  PaginationQuery,
   SendOtpBody,
   VerifyOtpBody,
   RegisterBody,
@@ -60,6 +55,10 @@ import {
   ResourceAuditParams,
 } from "./auth.schema";
 
+import {
+  PaginationQuerySchema,
+  parsePagination
+} from "../../shared/index";
 // ── Rate limit windows ────────────────────────────────────────────────────────
 
 const RL_WINDOW = env.RATE_LIMIT_WINDOW_MIN * 60;
@@ -69,97 +68,8 @@ const RL_COOLDOWN = env.RATE_LIMIT_COOLDOWN_SEC;
 // ── Shared TypeBox primitives ─────────────────────────────────────────────────
 // Schemas imported from auth.schema.ts
 
-/**
- * Safely parses pagination query parameters into standard numeric values.
- *
- * @param query - The raw query object from Elysia.
- * @returns An object with page, limit, order, and optional cursor.
- */
-function parsePagination(query: typeof PaginationQuery.static) {
-  return {
-    page: query.page ?? 1,
-    limit: query.limit ?? 20,
-    order: (query.order ?? "desc") as "asc" | "desc",
-    cursor: query.cursor,
-  };
-}
 
-type DeviceInfo = {
-  browser: string;
-  browserVersion: string;
-  os: string;
-  deviceType: string;
-  userAgent: string;
-  ip: string;
-};
-
-type RequestContext = {
-  ip: string;
-  userAgent: string;
-  deviceInfo: DeviceInfo;
-};
-
-/**
- * Resolves request context information including the client IP and device fingerprint.
- * Enforces secure IP resolution via TRUST_PROXY configuration.
- *
- * @param ctx - Elysia request context.
- * @returns Request metadata used across controllers and services.
- */
-
-function resolveRequestContext({
-  request,
-  server,
-}: {
-  request: Request;
-  server: { requestIP(req: Request): { address: string } | null } | null;
-}): RequestContext {
-  let ip = server?.requestIP(request)?.address ?? "unknown";
-
-  // Enforce secure IP extraction if behind a proxy.
-  if (env.TRUST_PROXY) {
-    const forwardedFor = request.headers.get("x-forwarded-for");
-    if (forwardedFor) {
-      ip = forwardedFor.split(",")[0].trim();
-    }
-  }
-
-  const userAgent = request.headers.get("user-agent") ?? "";
-  const fingerprint = request.headers.get("x-device-fingerprint") ?? "unknown";
-  const parseResult = new UAParser(userAgent).getResult();
-
-  const deviceInfo = {
-    browser: parseResult.browser.name || "Unknown",
-    browserVersion: parseResult.browser.version || "Unknown",
-    os: parseResult.os.name || "Unknown",
-    deviceType: parseResult.device.type || "desktop",
-    userAgent,
-    ip,
-    fingerprint,
-  };
-
-  return { ip, userAgent, deviceInfo };
-}
-
-// ── authenticate ──────────────────────────────────────────────────────────────
-// Promotes the optional ctx.user injected by jwtAuthPlugin into a guaranteed
-// actor value. Throws 401 early so route handlers can assume actor is present.
-
-/**
- * Middleware adapter that ensures a user is authenticated.
- * Promotes the optional 'user' context to a guaranteed 'actor' object.
- *
- * @param ctx - Context from Elysia (after jwtAuthPlugin).
- * @returns An object containing the guaranteed authenticated actor.
- * @throws 401 Unauthorized if no user is found in the context.
- */
-function authenticate(ctx: { user?: AuthUser; [key: string]: unknown }): {
-  actor: AuthUser;
-} {
-  if (!ctx.user) throw AuthErrors.Common.unauthorized();
-  return { actor: ctx.user };
-}
-
+import { authenticate, resolveRequestContext } from "../../shared/utils/request.utils";
 // ═════════════════════════════════════════════════════════════════════════════
 // PUBLIC ROUTES — No JWT Required
 // ═════════════════════════════════════════════════════════════════════════════
@@ -481,7 +391,8 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     "/",
     ({ actor, query }) => UserController.list(parsePagination(query), actor),
     {
-      query: PaginationQuery,
+      beforeHandle: [rbacGuard(["admin"])],
+      query: PaginationQuerySchema,
       detail: {
         summary: "List all users (admin)",
         security: [{ bearerAuth: [] }],
@@ -500,6 +411,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     "/:id",
     ({ actor, params }) => UserController.getById(params.id, actor),
     {
+      beforeHandle: [rbacGuard(["admin"])],
       params: UUIDParam,
       detail: {
         summary: "Get a user by ID",
@@ -526,6 +438,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     ({ actor, params, body, ip }) =>
       UserController.update(params.id, body, actor, { ip }),
     {
+      beforeHandle: [rbacGuard(["admin"])],
       params: UUIDParam,
       body: UpdateProfileBody,
       detail: {
@@ -540,6 +453,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     ({ actor, params, body, ip }) =>
       UserController.updateStatus(params.id, body.status, actor, { ip }),
     {
+      beforeHandle: [rbacGuard(["admin"])],
       params: UUIDParam,
       body: UpdateStatusBody,
       detail: {
@@ -565,6 +479,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     ({ actor, params, ip }) =>
       UserController.softDelete(params.id, actor, { ip }),
     {
+      beforeHandle: [rbacGuard(["admin"])],
       params: UUIDParam,
       detail: {
         summary: "Soft-delete a user account (admin)",
@@ -767,7 +682,7 @@ export const referralRoutes = new Elysia({
     ({ actor, query }) =>
       ReferralController.listMine(actor, parsePagination(query)),
     {
-      query: PaginationQuery,
+      query: PaginationQuerySchema,
       detail: {
         summary: "List referrals made by current user",
         security: [{ bearerAuth: [] }],
@@ -785,6 +700,7 @@ export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
   .derive(authenticate)
+  .use(rbacPlugin(["admin"]))
 
   .get("/", ({ actor }) => RoleController.list(actor), {
     detail: {
@@ -846,6 +762,9 @@ export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
     },
   );
 
+
+  
+
 // ── 12. Audit routes (protected) ──────────────────────────────────────────────
 
 /**
@@ -861,7 +780,7 @@ export const auditRoutes = new Elysia({ prefix: "/audit", tags: ["Audit"] })
     ({ actor, query }) =>
       AuditController.listMine(actor, parsePagination(query)),
     {
-      query: PaginationQuery,
+      query: PaginationQuerySchema,
       detail: {
         summary: "List audit entries for current user",
         security: [{ bearerAuth: [] }],
@@ -879,8 +798,9 @@ export const auditRoutes = new Elysia({ prefix: "/audit", tags: ["Audit"] })
         actor,
       ),
     {
+      beforeHandle: [rbacGuard(["admin"])],
       params: ResourceAuditParams,
-      query: PaginationQuery,
+      query: PaginationQuerySchema,
       detail: {
         summary: "List audit entries for a resource (admin)",
         security: [{ bearerAuth: [] }],

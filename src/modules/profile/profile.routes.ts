@@ -325,7 +325,7 @@ export const profileRoutes = new Elysia({
 
   .get(
     "/me",
-    ({ actor, ip }) => ProfileController.getFullProfile({ user: actor, ip }),
+    ({ actor }) => ProfileController.getFullProfile(actor.id, actor),
     {
       detail: {
         summary: "Get full composite profile",

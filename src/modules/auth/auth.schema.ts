@@ -70,12 +70,7 @@ export const UUIDParam = t.Object({
   id: t.String({ format: "uuid" }),
 });
 
-export const PaginationQuery = t.Object({
-  page: t.Optional(t.Numeric({ minimum: 1, default: 1 })),
-  limit: t.Optional(t.Numeric({ minimum: 1, maximum: 100, default: 20 })),
-  order: t.Optional(t.Union([t.Literal("asc"), t.Literal("desc")])),
-  cursor: t.Optional(t.String()),
-});
+import {type Pagination, type PaginationQuery } from "../../shared";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. TypeBox enum schemas — derived from DB enum arrays (single source)
@@ -215,13 +210,7 @@ export type LoginWithOtpToken = Static<typeof LoginWithOtpTokenBody>;
 export type UpdateProfile = Static<typeof UpdateProfileBody>;
 export type TwoFactorVerify = Static<typeof TwoFactorVerifyBody>;
 
-/** Normalised pagination — resolved from PaginationQuery in the route layer */
-export type Pagination = {
-  page: number;
-  limit: number;
-  order: "asc" | "desc";
-  cursor?: string;
-};
+export { Pagination, PaginationQuery };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. Internal DB enum types (Zod)

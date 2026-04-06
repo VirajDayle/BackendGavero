@@ -1,5 +1,5 @@
 import { pgTable as table } from "drizzle-orm/pg-core";
-import { type InferInsertModel, type InferSelectModel } from "drizzle-orm";
+import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
 import * as t from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import {
@@ -445,7 +445,7 @@ export const referralTable = table(
   ],
 );
 
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------
 // Audit Log (immutable append-only trail)
 // ---------------------------------------------------------------------------
 

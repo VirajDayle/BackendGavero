@@ -59,7 +59,8 @@ import type {
 import { env } from "../../config/env";
 import { redis } from "../../config/redis";
 // ---------------------------------------------------------------------------
-import type { Pagination } from "./auth.schema";
+import type { Pagination } from "../../shared";
+import { clean, applyPagination, applyCursorPagination } from "../../shared";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -71,33 +72,6 @@ type RoleUpdate = Partial<RoleInsert>;
 type ReferralUpdate = Partial<ReferralInsert>;
 type RateLimitUpdate = Partial<RateLimitInsert>;
 type UserDeviceUpdate = Partial<UserDeviceInsert>;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined),
-  ) as Partial<T>;
-}
-
-function applyPagination(limit: number, page: number) {
-  return { limit, offset: (page - 1) * limit };
-}
-
-// Replace applyCursorPagination in auth.repository.ts
-function applyCursorPagination(
-  column: any,
-  cursor: string | undefined,
-  order: "asc" | "desc",
-  existingWhere?: any
-) {
-  if (!cursor) return existingWhere;
-  const cursorClause = order === "asc" ? gt(column, cursor) : lt(column, cursor);
-  return existingWhere ? and(existingWhere, cursorClause) : cursorClause;
-}
-
 
 // ---------------------------------------------------------------------------
 // 1. UserRepository
@@ -112,22 +86,16 @@ export class UserRepository {
    * Initializes the UserRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a user by their unique UUID.
    * By default, it filters out accounts that have been soft-deleted.
-   * 
+   *
    * @param id - The UUID of the user.
    * @param opts - Query options.
    * @param opts.includeDeleted - If true, include soft-deleted accounts in search.
    * @returns The user record if found, otherwise null.
-   */
-  /**
-   * Finds a role by its unique UUID.
-   * 
-   * @param id - The UUID of the role.
-   * @returns The role record, or null.
    */
   async findById(
     id: string,
@@ -148,7 +116,7 @@ export class UserRepository {
   /**
    * Finds a user by their email address.
    * Efficiently handles lowercase normalization for consistent lookups.
-   * 
+   *
    * @param email - The email address to search for.
    * @param opts - Query options.
    * @param opts.includeDeleted - If true, include soft-deleted accounts.
@@ -173,7 +141,7 @@ export class UserRepository {
   /**
    * Finds a user by their normalized E.164 phone number.
    * Primary lookup used during the OTP-based registration and login flows.
-   * 
+   *
    * @param phone - The E.164 phone number.
    * @param opts - Query options.
    * @param opts.includeDeleted - If true, include soft-deleted accounts.
@@ -198,14 +166,9 @@ export class UserRepository {
   /**
    * Retrieves a paginated list of all active users.
    * Supports offset-based pagination and cursor-based ordering.
-   * 
+   *
    * @param pagination - Pagination and ordering parameters.
    * @returns A promise resolving to an object containing items and the total count.
-   */
-  /**
-   * Lists all roles in the system, ordered by name.
-   * 
-   * @returns An array of all role records.
    */
   async list(
     pagination: Pagination,
@@ -268,7 +231,7 @@ export class UserRepository {
   /**
    * Performs a soft-delete by setting the `deletedAt` timestamp.
    * This effectively hides the user from standard lookups while preserving data for audit.
-   * 
+   *
    * @param id - The UUID of the user to delete.
    * @param deletedBy - The ID of the actor performing the deletion.
    * @returns The updated user record, or null if already deleted.
@@ -286,7 +249,7 @@ export class UserRepository {
   /**
    * Anti-Brute Force: Atomically increments the failed login counter.
    * Part of the security mechanism to prevent PIN brute-forcing.
-   * 
+   *
    * @param id - The UUID of the user.
    * @returns The updated number of failed attempts.
    */
@@ -305,7 +268,7 @@ export class UserRepository {
 
   /**
    * Resets the failed login counter for a user after a successful login.
-   * 
+   *
    * @param id - The UUID of the user.
    */
   async resetFailedLogins(id: string): Promise<void> {
@@ -319,7 +282,7 @@ export class UserRepository {
   /**
    * Anti-Brute Force: Temporarily locks the account from future logins.
    * Prevents further attempts until the specified timestamp.
-   * 
+   *
    * @param id - The UUID of the user.
    * @param until - The timestamp when the lock should expire.
    * @returns The updated user record.
@@ -336,7 +299,7 @@ export class UserRepository {
 
   /**
    * Marks a user's email as verified and records the timestamp.
-   * 
+   *
    * @param id - The UUID of the user.
    * @returns The updated user record.
    */
@@ -356,7 +319,7 @@ export class UserRepository {
 
   /**
    * Marks a user's phone as verified.
-   * 
+   *
    * @param id - The UUID of the user.
    * @returns The updated user record.
    */
@@ -375,7 +338,7 @@ export class UserRepository {
 
   /**
    * Updates the `lastLoginAt` and `lastLoginIp` metadata for a user.
-   * 
+   *
    * @param id - The UUID of the user.
    * @param ip - The client IP address of the most recent login.
    * @returns The updated user record.
@@ -393,7 +356,7 @@ export class UserRepository {
   /**
    * Updates the user's security PIN hash.
    * Also updates the `pinChangedAt` timestamp for session invalidation tracking.
-   * 
+   *
    * @param id - The UUID of the user.
    * @param pinHash - The Argon2/Bcrypt hash of the new 6-digit PIN.
    * @returns The updated user record.
@@ -426,12 +389,12 @@ export class OtpRepository {
    * Initializes the OtpRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Atomically increments the attempt counter for an OTP record.
    * Used to prevent brute-forcing of the 6-digit codes.
-   * 
+   *
    * @param id - The UUID of the OTP record.
    * @returns The updated attempt count.
    */
@@ -448,7 +411,7 @@ export class OtpRepository {
   /**
    * Finds a valid, non-expired, and non-consumed OTP by phone number and purpose.
    * This is the primary lookup during phone-based login and registration.
-   * 
+   *
    * @param phone - The E.164 phone number.
    * @param purpose - The specific intent of the OTP (e.g., 'phone_verification').
    * @returns The active OTP record, or null if none exist or it's expired.
@@ -476,7 +439,7 @@ export class OtpRepository {
 
   /**
    * Finds a valid, non-expired, and non-consumed OTP by email address.
-   * 
+   *
    * @param email - The user's email address.
    * @param purpose - The specific intent (e.g., 'email_verification').
    * @returns The active OTP record, or null.
@@ -505,7 +468,7 @@ export class OtpRepository {
   /**
    * Finds an active OTP for a specific user and purpose.
    * Used for in-app flows like 2FA setup or account deletion.
-   * 
+   *
    * @param userId - The UUID of the authenticated user.
    * @param purpose - The specific intent (e.g., 'enable_2fa').
    * @returns The active OTP record, or null.
@@ -545,7 +508,7 @@ export class OtpRepository {
 
   /**
    * Increments the attempt counter for an OTP.
-   * 
+   *
    * @param id - The UUID of the OTP record.
    */
   async incrementAttempts(id: string): Promise<void> {
@@ -557,7 +520,7 @@ export class OtpRepository {
 
   /**
    * Marks an OTP as verified and sets the verification timestamp.
-   * 
+   *
    * @param id - The UUID of the OTP record.
    * @returns The updated OTP record, or null.
    */
@@ -573,7 +536,7 @@ export class OtpRepository {
 
   /**
    * Marks an OTP as consumed to prevent reuse.
-   * 
+   *
    * @param id - The UUID of the OTP record.
    * @returns The updated OTP record, or null.
    */
@@ -591,7 +554,7 @@ export class OtpRepository {
    * Atomically marks an OTP as verified AND consumed in a single UPDATE.
    * Prevents the race condition where a crash between markVerified() and
    * consume() could leave an OTP verified but reusable.
-   * 
+   *
    * @param id - The UUID of the OTP record.
    * @returns The updated OTP record, or null if already consumed.
    */
@@ -614,7 +577,7 @@ export class OtpRepository {
   /**
    * Consumes all currently active OTPs for a specific phone and purpose.
    * Typically called before sending a fresh OTP to ensure single-active-OTP policy.
-   * 
+   *
    * @param phone - The E.164 phone number.
    * @param purpose - The specific intent of the OTP.
    */
@@ -636,7 +599,7 @@ export class OtpRepository {
 
   /**
    * Invalidates all active OTPs for a specific user and purpose.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @param purpose - The specific intent of the OTP.
    */
@@ -670,11 +633,11 @@ export class SessionRepository {
    * Initializes the SessionRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a session by its unique UUID.
-   * 
+   *
    * @param id - The UUID of the session.
    * @returns The session record, or null.
    */
@@ -691,7 +654,7 @@ export class SessionRepository {
   /**
    * Finds a session by the SHA-256 hash of its refresh token.
    * Used during the `/auth/token/refresh` flow.
-   * 
+   *
    * @param hash - The hex-encoded SHA-256 hash of the refresh token.
    * @returns The session record, or null.
    */
@@ -708,7 +671,7 @@ export class SessionRepository {
   /**
    * Finds a session by its associated Access Token JTI (unique identifier).
    * Used for validating access tokens against the database/Redis blacklist.
-   * 
+   *
    * @param jti - The unique identifier of the access token.
    * @returns The session record, or null.
    */
@@ -725,7 +688,7 @@ export class SessionRepository {
   /**
    * Retrieves all active, non-expired sessions for a user.
    * Used to show the user their current logins or for mass-revocation.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @returns An array of active session records.
    */
@@ -754,7 +717,7 @@ export class SessionRepository {
 
   /**
    * Updates an existing session record.
-   * 
+   *
    * @param id - The UUID of the session.
    * @param data - The partial session data to update.
    * @returns The updated session record, or null.
@@ -762,7 +725,7 @@ export class SessionRepository {
   /**
    * Updates a custom role definition.
    * Note: System-managed roles (isSystem: true) cannot be updated.
-   * 
+   *
    * @param id - The UUID of the role.
    * @param data - The partial data to update.
    * @returns The updated role record, or null if system-managed or not found.
@@ -782,7 +745,7 @@ export class SessionRepository {
 
   /**
    * Updates the `lastActiveAt` timestamp for a session to the current time.
-   * 
+   *
    * @param id - The UUID of the session.
    */
   async touchLastActive(id: string): Promise<void> {
@@ -795,7 +758,7 @@ export class SessionRepository {
   /**
    * Admin/System Function: Forces a session into 'revoked' status.
    * Also blacklists the session's JTI in Redis for immediate invalidation.
-   * 
+   *
    * @param id - The UUID of the session.
    * @param reason - The reason for revocation (e.g., 'suspicious_activity').
    * @returns The updated session record, or null.
@@ -808,7 +771,11 @@ export class SessionRepository {
       .returning();
 
     if (row && row.accessTokenJti) {
-      await redis.setex(`revoke_jti:${row.accessTokenJti}`, (env.JWT_ACCESS_TTL_MIN ?? 15) * 60, "revoked");
+      await redis.setex(
+        `revoke_jti:${row.accessTokenJti}`,
+        (env.JWT_ACCESS_TTL_MIN ?? 15) * 60,
+        "revoked",
+      );
     }
 
     return row ?? null;
@@ -817,7 +784,7 @@ export class SessionRepository {
   /**
    * Revokes all active sessions for a specific user.
    * Used for security resets or when a user changes their PIN.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @param reason - The reason for mass revocation.
    */
@@ -848,7 +815,7 @@ export class SessionRepository {
   /**
    * Marks a session as 'logged_out' upon user request.
    * Blacklists the JTI in Redis to ensure the access token is invalid.
-   * 
+   *
    * @param id - The UUID of the session.
    * @returns The updated session record, or null.
    */
@@ -860,7 +827,11 @@ export class SessionRepository {
       .returning();
 
     if (row && row.accessTokenJti) {
-      await redis.setex(`revoke_jti:${row.accessTokenJti}`, (env.JWT_ACCESS_TTL_MIN ?? 15) * 60, "logged_out");
+      await redis.setex(
+        `revoke_jti:${row.accessTokenJti}`,
+        (env.JWT_ACCESS_TTL_MIN ?? 15) * 60,
+        "logged_out",
+      );
     }
 
     return row ?? null;
@@ -879,11 +850,11 @@ export class RoleRepository {
    * Initializes the RoleRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a role by its unique UUID.
-   * 
+   *
    * @param id - The UUID of the role.
    * @returns The role record, or null.
    */
@@ -899,7 +870,7 @@ export class RoleRepository {
 
   /**
    * Finds a role by its unique URL-friendly slug (e.g., 'admin').
-   * 
+   *
    * @param slug - The role slug.
    * @returns The role record, or null.
    */
@@ -915,7 +886,7 @@ export class RoleRepository {
 
   /**
    * Lists all available roles.
-   * 
+   *
    * @returns An array of all role records.
    */
   async list(): Promise<Role[]> {
@@ -924,7 +895,7 @@ export class RoleRepository {
 
   /**
    * Creates a new role definition.
-   * 
+   *
    * @param data - The role data to insert.
    * @returns The created role record.
    */
@@ -936,7 +907,7 @@ export class RoleRepository {
   /**
    * Updates a custom role definition.
    * Note: System-managed roles (isSystem: true) cannot be updated.
-   * 
+   *
    * @param id - The UUID of the role.
    * @param data - The partial data to update.
    * @returns The updated role record, or null if system-managed or not found.
@@ -954,7 +925,7 @@ export class RoleRepository {
   /**
    * Deletes a custom role definition.
    * Note: System-managed roles (isSystem: true) cannot be deleted.
-   * 
+   *
    * @param id - The UUID of the role.
    * @returns True if the role was deleted, false otherwise.
    */
@@ -979,11 +950,11 @@ export class PermissionRepository {
    * Initializes the PermissionRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a permission by its unique UUID.
-   * 
+   *
    * @param id - The UUID of the permission.
    * @returns The permission record, or null.
    */
@@ -1000,7 +971,7 @@ export class PermissionRepository {
   /**
    * Finds a specific permission node by action and resource.
    * e.g., action='create', resource='user'.
-   * 
+   *
    * @param action - The HTTP-style action.
    * @param resource - The resource identifier.
    * @returns The permission record, or null.
@@ -1025,7 +996,7 @@ export class PermissionRepository {
 
   /**
    * Lists all available permissions.
-   * 
+   *
    * @returns An array of all permission records.
    */
   async list(): Promise<Permission[]> {
@@ -1037,7 +1008,7 @@ export class PermissionRepository {
 
   /**
    * Creates a new permission node.
-   * 
+   *
    * @param data - The permission data to insert.
    * @returns The created permission record.
    */
@@ -1051,7 +1022,7 @@ export class PermissionRepository {
 
   /**
    * Deletes a permission node.
-   * 
+   *
    * @param id - The UUID of the permission.
    * @returns True if the permission was deleted, false otherwise.
    */
@@ -1076,11 +1047,11 @@ export class RolePermissionRepository {
    * Initializes the RolePermissionRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Lists all permissions associated with a specific role.
-   * 
+   *
    * @param roleId - The UUID of the role.
    * @returns An array of role-permission mappings.
    */
@@ -1097,7 +1068,7 @@ export class RolePermissionRepository {
   /**
    * Assigns a permission to a role.
    * Uses `onConflictDoNothing` to prevent duplicate mappings.
-   * 
+   *
    * @param data - The role-permission mapping data.
    * @returns The newly created mapping record, or null if it already exists.
    */
@@ -1137,11 +1108,11 @@ export class UserRoleRepository {
    * Initializes the UserRoleRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Lists all active roles assigned to a user.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @returns An array of user-role mappings.
    */
@@ -1163,7 +1134,7 @@ export class UserRoleRepository {
   /**
    * Retrieves the raw list of role slugs assigned to a user.
    * Primarily used for JWT payload construction.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @returns An array of objects containing the role slug.
    */
@@ -1187,7 +1158,7 @@ export class UserRoleRepository {
 
   /**
    * Assigns a role to a user.
-   * 
+   *
    * @param data - The user-role mapping data.
    * @returns The newly created mapping, or null if it already exists.
    */
@@ -1203,7 +1174,7 @@ export class UserRoleRepository {
 
   /**
    * Revokes a role from a user.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @param roleId - The UUID of the role.
    * @param shopId - Optional shop context for the role assignment.
@@ -1244,11 +1215,11 @@ export class AuthAttemptRepository {
    * Initializes the AuthAttemptRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Creates a new authentication attempt record.
-   * 
+   *
    * @param data - The auth attempt data to insert.
    * @returns The newly created record.
    */
@@ -1263,7 +1234,7 @@ export class AuthAttemptRepository {
 
   /**
    * Counts recent failed login attempts by IP address.
-   * 
+   *
    * @param ip - The IP address to check.
    * @param windowMinutes - The time window in minutes.
    * @returns The count of failed attempts.
@@ -1290,7 +1261,7 @@ export class AuthAttemptRepository {
 
   /**
    * Counts recent failed login attempts by User ID.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @param windowMinutes - The time window in minutes.
    * @returns The count of failed attempts.
@@ -1317,7 +1288,7 @@ export class AuthAttemptRepository {
 
   /**
    * Counts recent failed login attempts by phone number.
-   * 
+   *
    * @param phone - The phone number to check.
    * @param windowMinutes - The time window in minutes.
    * @returns The count of failed attempts.
@@ -1344,7 +1315,7 @@ export class AuthAttemptRepository {
 
   /**
    * Lists authentication attempts for a user with pagination.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @param pagination - Pagination settings.
    * @returns An array of auth attempt records.
@@ -1387,11 +1358,11 @@ export class ReferralCodeRepository {
    * Initializes the ReferralCodeRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a referral code by its string representation.
-   * 
+   *
    * @param code - The referral code string.
    * @returns The referral code record, or null.
    */
@@ -1407,7 +1378,7 @@ export class ReferralCodeRepository {
 
   /**
    * Finds an active referral code by its unique string (e.g., 'REF123').
-   * 
+   *
    * @param code - The Alphanumeric referral code.
    * @returns The referral code record, or null if expired or not found.
    */
@@ -1436,7 +1407,7 @@ export class ReferralCodeRepository {
 
   /**
    * Retrieves the referral code assigned to a specific user.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @returns The referral code record, or null.
    */
@@ -1452,7 +1423,7 @@ export class ReferralCodeRepository {
 
   /**
    * Creates a new referral code for a user.
-   * 
+   *
    * @param data - The referral code data to insert.
    * @returns The newly created record.
    */
@@ -1467,7 +1438,7 @@ export class ReferralCodeRepository {
 
   /**
    * Atomically increments the usage counter for a referral code.
-   * 
+   *
    * @param id - The UUID of the referral code.
    */
   async incrementUsage(id: string): Promise<void> {
@@ -1479,7 +1450,7 @@ export class ReferralCodeRepository {
 
   /**
    * Deactivates a referral code.
-   * 
+   *
    * @param id - The UUID of the referral code.
    */
   async deactivate(id: string): Promise<void> {
@@ -1498,11 +1469,11 @@ export class ReferralRepository {
    * Initializes the ReferralRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a referral record by the referee's user ID.
-   * 
+   *
    * @param refereeId - The UUID of the referee.
    * @returns The referral record, or null.
    */
@@ -1518,7 +1489,7 @@ export class ReferralRepository {
 
   /**
    * Lists all referrals made by a specific referrer.
-   * 
+   *
    * @param referrerId - The UUID of the referrer.
    * @param pagination - Pagination settings.
    * @returns An object containing the list of referrals and the total count.
@@ -1562,7 +1533,7 @@ export class ReferralRepository {
 
   /**
    * Creates a new referral record.
-   * 
+   *
    * @param data - The referral data to insert.
    * @returns The created referral record.
    */
@@ -1573,7 +1544,7 @@ export class ReferralRepository {
 
   /**
    * Updates a referral record.
-   * 
+   *
    * @param id - The UUID of the referral.
    * @param data - The partial data to update.
    * @returns The updated referral record, or null.
@@ -1598,11 +1569,11 @@ export class AuditLogRepository {
    * Initializes the AuditLogRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Creates a new audit log entry.
-   * 
+   *
    * @param data - The audit log data to insert.
    * @returns The created audit log record.
    */
@@ -1630,7 +1601,7 @@ export class AuditLogRepository {
 
   /**
    * Lists audit logs filtered by the actor who performed the action.
-   * 
+   *
    * @param actorId - The UUID of the actor.
    * @param pagination - Pagination settings.
    * @returns An object containing the list of logs and the total count.
@@ -1682,12 +1653,15 @@ export class AuditLogRepository {
       )
       .limit(limit)
       .offset(offset);
-    return { items: items as unknown as AuditLog[], total: countRow?.count ?? 0 };
+    return {
+      items: items as unknown as AuditLog[],
+      total: countRow?.count ?? 0,
+    };
   }
 
   /**
    * Lists audit logs filtered by the resource affected.
-   * 
+   *
    * @param resource - The resource type.
    * @param resourceId - The UUID of the resource.
    * @param pagination - Pagination settings.
@@ -1744,12 +1718,15 @@ export class AuditLogRepository {
       )
       .limit(limit)
       .offset(offset);
-    return { items: items as unknown as AuditLog[], total: countRow?.count ?? 0 };
+    return {
+      items: items as unknown as AuditLog[],
+      total: countRow?.count ?? 0,
+    };
   }
 
   /**
    * Lists audit logs within a specific time range.
-   * 
+   *
    * @param from - Start date.
    * @param to - End date.
    * @param pagination - Pagination settings.
@@ -1804,11 +1781,11 @@ export class RateLimitRepository {
    * Initializes the RateLimitRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a rate limit record by key and action.
-   * 
+   *
    * @param key - The identifier (e.g., IP or User ID).
    * @param action - The action being rate limited.
    * @returns The rate limit record, or null.
@@ -1830,7 +1807,7 @@ export class RateLimitRepository {
 
   /**
    * Upserts a rate limit record.
-   * 
+   *
    * @param data - The rate limit data to insert or update.
    * @returns The rate limit record.
    */
@@ -1853,7 +1830,7 @@ export class RateLimitRepository {
 
   /**
    * Updates a rate limit record.
-   * 
+   *
    * @param id - The UUID of the rate limit record.
    * @param data - The partial data to update.
    * @returns The updated rate limit record, or null.
@@ -1870,7 +1847,7 @@ export class RateLimitRepository {
 
   /**
    * Blocks a rate limit key until a specific time.
-   * 
+   *
    * @param id - The UUID of the rate limit record.
    * @param until - The date until which the key is blocked.
    */
@@ -1883,7 +1860,7 @@ export class RateLimitRepository {
 
   /**
    * Resets the rate limit counters for a key and action.
-   * 
+   *
    * @param key - The identifier.
    * @param action - The action.
    */
@@ -1898,7 +1875,7 @@ export class RateLimitRepository {
 
   /**
    * Deletes all expired rate limit records.
-   * 
+   *
    * @returns The number of deleted records.
    */
   async deleteExpired(): Promise<number> {
@@ -1912,7 +1889,7 @@ export class RateLimitRepository {
   /**
    * High-level rate limit check.
    * Increments the counter and returns true if the limit is exceeded.
-   * 
+   *
    * @param key - The identifier.
    * @param action - The action.
    * @param opts - Configuration for max attempts and window size.
@@ -1986,11 +1963,11 @@ export class UserDeviceRepository {
    * Initializes the UserDeviceRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) { }
+  constructor(private readonly db: DB) {}
 
   /**
    * Finds a device by user ID and fingerprint.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @param fingerprint - The device fingerprint string.
    * @returns The user device record, or null.
@@ -2015,7 +1992,7 @@ export class UserDeviceRepository {
 
   /**
    * Lists all devices associated with a user.
-   * 
+   *
    * @param userId - The UUID of the user.
    * @returns An array of user device records.
    */
@@ -2029,7 +2006,7 @@ export class UserDeviceRepository {
 
   /**
    * Upserts a user device record.
-   * 
+   *
    * @param data - The user device data to insert or update.
    * @returns The user device record.
    */
@@ -2053,7 +2030,7 @@ export class UserDeviceRepository {
 
   /**
    * Updates a user device record.
-   * 
+   *
    * @param id - The UUID of the device.
    * @param data - The partial data to update.
    * @returns The updated user device record, or null.
@@ -2070,7 +2047,7 @@ export class UserDeviceRepository {
 
   /**
    * Sets the trusted status of a device.
-   * 
+   *
    * @param id - The UUID of the device.
    * @param trusted - Whether the device is trusted.
    */
@@ -2083,7 +2060,7 @@ export class UserDeviceRepository {
 
   /**
    * Revokes a device session.
-   * 
+   *
    * @param id - The UUID of the device.
    * @param userId - The UUID of the user.
    * @returns True if the device was revoked, false otherwise.

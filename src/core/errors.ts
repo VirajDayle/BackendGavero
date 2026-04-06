@@ -64,6 +64,7 @@ export type ErrorCode =
   // Profile — City
   | "CITY_NOT_FOUND"
   | "CITY_SLUG_CONFLICT"
+  | "CITY_BOUNDARY_REQUIRED"
   // Profile — Pincode
   | "PINCODE_NOT_FOUND"
   | "PINCODE_CONFLICT"
@@ -168,6 +169,8 @@ export type ErrorCode =
   | "MAPBOX_API_ERROR"
   | "GEOCODING_FAILED"
   | "AUTOCOMPLETE_FAILED"
+  | "ZONE_NOT_FOUND"
+  | "ZONE_CONFLICT"
   // Generic
   | "NOT_FOUND"
   | "INTERNAL_ERROR"

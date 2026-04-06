@@ -21,6 +21,10 @@ class Common {
   static adminRequired(msg = "Admin access required") {
     return Common.forbidden(msg);
   }
+
+  static notFound(msg = "Resource not found") {
+    return new AppError(404, "NOT_FOUND", msg, meta("find_resource"));
+  }
 }
 
 // ── City ──────────────────────────────────────────────────────────────────────
@@ -37,6 +41,10 @@ class City {
       `City with slug "${slug}" already exists`,
       meta("create_city"),
     );
+  }
+
+  static boundaryRequired(msg = "City boundary polygon is mandatory for admin creation") {
+    return new AppError(422, "CITY_BOUNDARY_REQUIRED", msg, meta("create_city"));
   }
 }
 
@@ -55,13 +63,29 @@ class Pincode {
       meta("create_pincode"),
     );
   }
-
   static notServiceable(msg = "Location is not within a serviceable area") {
     return new AppError(
       422,
       "PINCODE_NOT_SERVICEABLE",
       msg,
       meta("check_serviceability"),
+    );
+  }
+}
+
+// ── Zone ──────────────────────────────────────────────────────────────────────
+
+class Zone {
+  static notFound(msg = "Serviceable zone not found") {
+    return new AppError(404, "ZONE_NOT_FOUND", msg, meta("find_zone"));
+  }
+
+  static conflict(h3Index: string) {
+    return new AppError(
+      409,
+      "ZONE_CONFLICT",
+      `Zone with H3 index "${h3Index}" is already registered`,
+      meta("create_zone"),
     );
   }
 }
@@ -92,4 +116,5 @@ export const PlatformErrors = {
   Common,
   City,
   Pincode,
+  Zone,
 } as const;

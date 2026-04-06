@@ -21,6 +21,13 @@ import {
 
 // ========
 
+export type Pagination = {
+  page: number;
+  limit: number;
+  order: "asc" | "desc";
+  cursor?: string;
+};
+
 const uuidSchema = z.uuid();
 
 const pincodeSchema = z
@@ -800,7 +807,6 @@ export const paginationSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: uuidSchema.optional(),
 });
-export type Pagination = z.infer<typeof paginationSchema>;
 
 /**
  * Serviceability check request — used to test if a given coordinate or

@@ -21,33 +21,30 @@ import {
 // ── Context type ──────────────────────────────────────────────────────────────
 // Subset of the Elysia context relevant to controllers.
 
-interface Ctx {
-  user: AuthUser;
+export type Meta = {
+  /** The client's original IP address (resolved via proxy if TRUST_PROXY is enabled). */
   ip: string;
-}
+  /** The raw User-Agent string from the client. */
+  userAgent: string;
+};
 
-function actor(ctx: Ctx) {
-  return {
-    actorId: ctx.user.id,
-    actorRoles: ctx.user.roles,
-    ip: ctx.ip,
-  };
-}
-
-function actorSimple(ctx: Ctx) {
-  return {
-    actorId: ctx.user.id,
-    ip: ctx.ip,
-  };
-}
+/**
+ * Represents the authenticated actor (user).
+ */
+export type Actor = {
+  /** The unique UUID of the user. */
+  id: string;
+  /** The list of role slugs assigned to the user. */
+  roles: string[];
+};
 
 // =============================================================================
 // COMPOSITE PROFILE
 // =============================================================================
 
-export abstract class ProfileController {
-  static async getFullProfile(ctx: Ctx) {
-    return await CompositeProfileService.getFullProfile(ctx.user.id);
+export const ProfileController =  {
+  async getFullProfile(id: string, actor: Actor) {
+    return await CompositeProfileService.getFullProfile(id, );
   }
 }
 

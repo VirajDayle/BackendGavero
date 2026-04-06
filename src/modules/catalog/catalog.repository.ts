@@ -9,6 +9,7 @@ import { and, desc, eq, isNull, sql, asc, count } from "drizzle-orm";
 import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
 import type { DB } from "../../db/index";
 import type { Pagination } from "./catalog.schema";
+import { clean, applyPagination } from "../../shared";
 
 import {
   brandTable,
@@ -126,19 +127,6 @@ type CouponUsageInsert = InferInsertModel<typeof couponUsageHistoryTable>;
 type CouponValidation = InferSelectModel<typeof couponValidationAttemptsTable>;
 type CouponValidationInsert = InferInsertModel<typeof couponValidationAttemptsTable>;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined),
-  ) as Partial<T>;
-}
-
-function applyPagination(limit: number, page: number) {
-  return { limit, offset: (page - 1) * limit };
-}
 
 // =============================================================================
 // 1. BrandRepository

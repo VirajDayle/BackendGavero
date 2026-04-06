@@ -8,6 +8,7 @@ import { and, desc, eq, gt, gte, isNull, lt, or, sql } from "drizzle-orm";
 import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
 import type { DB } from "../../db/index";
 import type { Pagination } from "./shop.schema";
+import { clean, applyPagination } from "../../shared";
 
 import {
   shopBranchesTable,
@@ -39,19 +40,6 @@ type ShopCategoryInsert = InferInsertModel<typeof preCategoriesTable>;
 type OperatingHours = InferSelectModel<typeof shopHoursTable>;
 type OperatingHoursInsert = InferInsertModel<typeof shopHoursTable>;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined),
-  ) as Partial<T>;
-}
-
-function applyPagination(limit: number, page: number) {
-  return { limit, offset: (page - 1) * limit };
-}
 
 // ---------------------------------------------------------------------------
 // 1. ShopRepository

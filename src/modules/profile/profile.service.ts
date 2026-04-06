@@ -1077,8 +1077,8 @@ export abstract class CompositeProfileService {
       const ratingAverage =
         deliveryPartner.ratingCount > 0
           ? Math.round(
-              (deliveryPartner.ratingSum / deliveryPartner.ratingCount) * 100,
-            ) / 100
+            (deliveryPartner.ratingSum / deliveryPartner.ratingCount) * 100,
+          ) / 100
           : null;
       dpWithRating = { ...deliveryPartner, ratingAverage };
     }
@@ -1086,23 +1086,23 @@ export abstract class CompositeProfileService {
     // Strip internal-only fields before returning to the user
     const shopOwnerPublic = shopOwner
       ? (() => {
-          const {
-            isSuspended: _s,
-            suspendedAt: _sa,
-            suspensionReason: _sr,
-            primaryBankAccountId: _pb,
-            metadata: _m,
-            ...rest
-          } = shopOwner;
-          return rest;
-        })()
+        const {
+          isSuspended: _s,
+          suspendedAt: _sa,
+          suspensionReason: _sr,
+          primaryBankAccountId: _pb,
+          metadata: _m,
+          ...rest
+        } = shopOwner;
+        return rest;
+      })()
       : null;
 
     const customerPublic = customer
       ? (() => {
-          const { metadata: _m, referralCodeId: _r, ...rest } = customer;
-          return rest;
-        })()
+        const { metadata: _m, referralCodeId: _r, ...rest } = customer;
+        return rest;
+      })()
       : null;
 
     return {

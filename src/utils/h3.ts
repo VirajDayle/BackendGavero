@@ -11,8 +11,47 @@
 //   Res 9  ~174 m  edge → neighbourhood-level, delivery zone bucketing
 // =============================================================================
 
-import { latLngToCell, gridDisk } from "h3-js";
+import { latLngToCell, gridDisk, polygonToCells, cellToBoundary } from "h3-js";
+import type { Polygon } from "geojson";
+/**
+ * Returns the 6 vertices of the H3 hexagon for visualization.
+ *
+ * @param h3Index 15-character hex string
+ * @returns Array of [lat, lng] points forming the hexagon
+ */
+export function h3ToBoundary(h3Index: string): [number, number][] {
+  return cellToBoundary(h3Index);
+}
 
+export function h3ToGeoJsonPolygon(h3Index: string): Polygon {
+  const latLngPairs = cellToBoundary(h3Index);
+
+  const ring: number[][] = latLngPairs.map(([lat, lng]) => [lng, lat]);
+  ring.push(ring[0]); // close the ring
+
+  return {
+    type: "Polygon",
+    coordinates: [ring],
+  };
+}
+
+/**
+ * Returns all H3 cells whose centers are within the given polygon.
+ *
+ * @param coordinates  Array of [lat, lng] points forming the closed ring
+ * @param resolution   H3 resolution (e.g. 7 for city zones)
+ * @returns Array of 15-character hex strings
+ */
+export function polyfill(
+  geoJson: Polygon,
+  resolution: number,
+): string[] {
+  return polygonToCells(
+    geoJson.coordinates,
+    resolution,
+    true // ✅ VERY IMPORTANT
+  );
+}
 /** City-level clustering — ~1.22 km hex edge */
 export const H3_RES_CITY = 7;
 

@@ -1,57 +1,75 @@
 import type { AuthUser } from "../../middleware/auth.middleware";
 import { LocationService } from "./location.service";
-import { CityService, PincodeService } from "./platform.service";
+import { CityService, PincodeService, ServiceableZoneService } from "./platform.service";
 import { paginatedRaw } from "../../core/response";
+import { type PaginationQuery, parsePagination } from "../../shared";
+import {
+  ReverseGeocodeQuery,
+  GeocodeQuery,
+  AutocompleteQuery,
+  RetrieveParam,
+  RetrieveQuery,
+  CreateCityBody,
+  UpdateCityBody,
+  CreatePincodeBody,
+  UpdatePincodeBody,
+  ServiceabilityCheck,
+  CreateZoneBody,
+  UpdateZoneBody,
+  PolyfillZoneBody,
+  CityListRequest,
+  ActiveFilter,
+  CityGetByIdOrSlugRequest,
+  CreateCity,
+  UpdateCity,
+  PincodeList,
+  ZoneListQuery,
+  SyncZoneWithBoundaryBody,
+} from "./platform.schema";
+
 
 // ── Context type ──────────────────────────────────────────────────────────────
 
-interface Ctx {
+export type Meta = {
+  ip: string;
+  userAgent: string;
+};
+
+export type Actor = {
+  id: string;
+  roles: string[];
+};
+
+type Ctx = {
   user: AuthUser;
   ip: string;
-}
+};
 
-function actor(ctx: Ctx) {
-  return {
-    actorId: ctx.user.id,
-    actorRoles: ctx.user.roles,
-    ip: ctx.ip,
-  };
-}
+const actor = (ctx: Ctx) => ({
+  actorId: ctx.user.id,
+  actorRoles: ctx.user.roles,
+  ip: ctx.ip,
+});
 
-function actorSimple(ctx: Ctx) {
-  return {
-    actorId: ctx.user.id,
-    ip: ctx.ip,
-  };
-}
+
 
 export const platformController = {
-  async reverseGeocode({ query }: { query: { lat: number; lng: number } }) {
+  async reverseGeocode({ query }: { query: ReverseGeocodeQuery }) {
     return await LocationService.reverseGeocode(query.lat, query.lng);
   },
 
-  async geocode({ query }: { query: { address: string } }) {
+  async geocode({ query }: { query: GeocodeQuery }) {
     return await LocationService.geocode(query.address);
   },
 
-  async autocomplete({
-    query,
-  }: {
-    query: { input: string; sessionToken?: string };
-  }) {
+  async autocomplete({ query }: { query: AutocompleteQuery }) {
     return await LocationService.autocomplete(
       query.input,
       query.sessionToken,
     );
   },
 
-  async retrieve({
-    params,
-    query,
-  }: {
-    params: { mapboxId: string };
-    query: { sessionToken?: string };
-  }) {
+  async retrieve({ params, query }: { params: RetrieveParam; query: RetrieveQuery }) {
     return await LocationService.retrieve(
       params.mapboxId,
       query.sessionToken,
@@ -75,85 +93,134 @@ export const platformController = {
 // CITIES
 // =============================================================================
 
-export abstract class CityController {
-  static async list(pagination: { page: number; limit: number }) {
-    const { items, total } = await CityService.list({
-      activeOnly: true,
-      ...pagination,
-    });
+export const CityController = {
+  async list(query: CityListRequest) {
+    const { filter, stateCode, ...paginationParams } = query;
+    const pagination = parsePagination(paginationParams);
+    const { items, total } = await CityService.list(
+      pagination,
+      filter as ActiveFilter,
+      stateCode,
+    );
     return paginatedRaw(items, pagination.page, pagination.limit, total);
-  }
+  },
 
-  static async create(
-    body: {
-      name: string;
-      slug: string;
-      state: string;
-      district?: string;
-      stateCode?: string;
-      country?: string;
-      countryCode?: string;
-      centroidLat?: number;
-      centroidLng?: number;
-      timezone?: string;
-      metadata?: Record<string, unknown>;
-    },
-    ctx: Ctx,
-  ) {
-    return await CityService.create(body, actor(ctx));
-  }
+  async listWithBoundary(query: CityListRequest) {
+    const { filter, stateCode, ...paginationParams } = query;
+    const pagination = parsePagination(paginationParams);
+    const { items, total } = await CityService.listWithBoundary(
+      pagination,
+      filter as ActiveFilter,
+      stateCode,
+    );
+    return paginatedRaw(items, pagination.page, pagination.limit, total);
+  },
 
-  static async update(id: string, body: Record<string, unknown>, ctx: Ctx) {
-    return await CityService.update(id, body, actor(ctx));
-  }
+  async getByIdOrSlug(params: CityGetByIdOrSlugRequest) {
+    return await CityService.getByIdOrSlug(params.idOrSlug);
+  },
 
-  static async setActive(id: string, isActive: boolean, ctx: Ctx) {
-    return await CityService.setActive(id, isActive, actor(ctx));
-  }
+  async create(body: CreateCity, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await CityService.create(body, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async update(id: string, body: UpdateCity, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await CityService.update(id, body, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async setActive(id: string, isActive: boolean, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await CityService.setActive(id, isActive, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
 }
 
 // =============================================================================
 // PINCODES
 // =============================================================================
 
-export abstract class PincodeController {
-  static async create(
-    body: {
-      pincode: string;
-      cityId: string;
-      localityName?: string;
-      deliveryLeadTimeMins?: number;
-      codAvailable?: boolean;
-    },
-    ctx: Ctx,
-  ) {
+export const PincodeController = {
+  async create(body: CreatePincodeBody, ctx: Ctx) {
     return await PincodeService.create(body, actor(ctx));
-  }
+  },
 
-  static async update(id: string, body: Record<string, unknown>, ctx: Ctx) {
-    return await PincodeService.update(id, body, actor(ctx));
-  }
+  async update(id: string, body: UpdatePincodeBody, ctx: Ctx) {
+    return await PincodeService.update(id, body as any, actor(ctx));
+  },
 
-  static async setActive(id: string, isActive: boolean, ctx: Ctx) {
+  async setActive(id: string, isActive: boolean, ctx: Ctx) {
     return await PincodeService.setActive(id, isActive, actor(ctx));
-  }
+  },
 
-  static async listByCity(
-    cityId: string,
-    pagination: { page: number; limit: number },
-  ) {
-    const { items, total } = await PincodeService.listByCity(cityId, {
-      activeOnly: true,
-      ...pagination,
-    });
+  async list(query: PincodeList) {
+    const { filter, ...paginationParams } = query;
+    const pagination = parsePagination(paginationParams);
+    const { items, total } = await PincodeService.list(
+      pagination,
+      filter as ActiveFilter,
+    );
     return paginatedRaw(items, pagination.page, pagination.limit, total);
-  }
+  },
 
-  static async checkServiceability(
-    check:
-      | { type: "coordinates"; latitude: number; longitude: number }
-      | { type: "pincode"; pincode: string },
-  ) {
+  async listByCity(cityId: string, pagination: PaginationQuery) {
+    const parsed = parsePagination(pagination);
+    const { items, total } = await PincodeService.listByCity(
+      cityId,
+      parsed,
+      true,
+    );
+    return paginatedRaw(items, parsed.page, parsed.limit, total);
+  },
+
+  async checkServiceability(check: ServiceabilityCheck) {
     return await PincodeService.checkServiceability(check);
   }
+}
+
+// =============================================================================
+// SERVICEABLE ZONES (H3)
+// =============================================================================
+
+export const ServiceableZoneController = {
+  async create(body: CreateZoneBody, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await ServiceableZoneService.create(body, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async update(id: string, body: UpdateZoneBody, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await ServiceableZoneService.update(id, body as any, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async setActive(id: string, isActive: boolean, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await ServiceableZoneService.setActive(id, isActive, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async listByCity(cityId: string, query: ZoneListQuery) {
+    const { filter, ...paginationParams } = query;
+    const pagination = parsePagination(paginationParams);
+    const { items, total } = await ServiceableZoneService.listByCity(
+      cityId,
+      pagination,
+      filter === "active",
+    );
+    return paginatedRaw(items, pagination.page, pagination.limit, total);
+  },
+
+  async polyfill(body: PolyfillZoneBody, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await ServiceableZoneService.polyfill(
+      body.cityId,
+      body.boundary,
+      { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip },
+      body.label,
+    );
+  },
+
+  async setActiveByCity(cityId: string, isActive: boolean, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await ServiceableZoneService.setActiveByCity(cityId, isActive, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async syncZonesWithBoundary(cityId: string, body: SyncZoneWithBoundaryBody, actor: Actor, meta: Pick<Meta, "ip">) {
+    return await ServiceableZoneService.syncZonesWithBoundary(cityId, body.boundary, { actorId: actor.id, actorRoles: actor.roles, ip: meta.ip });
+  },
+
+  async checkServiceability(check: ServiceabilityCheck) {
+    return await ServiceableZoneService.checkServiceability(check.latitude, check.longitude);
+  },
 }

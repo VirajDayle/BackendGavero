@@ -1,58 +1,86 @@
-import {
-  and,
-  desc,
-  eq,
-  isNotNull,
-  lt,
-  ne,
-  or,
-  sql,
-} from "drizzle-orm";
-import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
+/**
+ * platform.repository.ts
+ *
+ * Data-access layer — one repository class per domain aggregate.
+ */
+
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type { DB } from "../../db/index";
 
 import {
   citiesTable,
+  serviceableH3ZonesTable,
   serviceablePincodesTable,
 } from "../../db/schema";
 
+import type {
+  CityInsert,
+  ServiceableH3Zone,
+  ServiceableH3ZoneInsert,
+  ServiceablePincode,
+  ServiceablePincodeInsert,
+} from "../../db/schema";
+
+import type { Pagination } from "../../shared";
+import { clean, applyPagination, applyCursorPagination } from "../../shared";
+import type { CityMapItem, CityPublic } from "./platform.schema";
+
 // =============================================================================
-// ROW TYPES
+// Shared types
 // =============================================================================
 
-type City = InferSelectModel<typeof citiesTable>;
-type CityInsert = InferInsertModel<typeof citiesTable>;
+export type ActiveFilter = "all" | "active" | "inactive";
+
 type CityUpdate = Partial<CityInsert>;
-
-type ServiceablePincode = InferSelectModel<typeof serviceablePincodesTable>;
-type ServiceablePincodeInsert = InferInsertModel<typeof serviceablePincodesTable>;
+type ServiceableH3ZoneUpdate = Partial<ServiceableH3ZoneInsert>;
 type ServiceablePincodeUpdate = Partial<ServiceablePincodeInsert>;
 
 // =============================================================================
-// HELPERS
+// Helpers
 // =============================================================================
 
-function applyPagination(limit: number, page: number) {
-  return { limit, offset: (page - 1) * limit };
-}
+const cityPublicColumns = {
+  id: citiesTable.id,
+  name: citiesTable.name,
+  slug: citiesTable.slug,
+  state: citiesTable.state,
+  stateCode: citiesTable.stateCode,
+  district: citiesTable.district,
+  country: citiesTable.country,
+  countryCode: citiesTable.countryCode,
+  isActive: citiesTable.isActive,
+  centroidLat: citiesTable.centroidLat,
+  centroidLng: citiesTable.centroidLng,
+  timezone: citiesTable.timezone,
+  launchedAt: citiesTable.launchedAt,
+  metadata: sql<Record<string, unknown> | null>`${citiesTable.metadata}`,
+  createdAt: citiesTable.createdAt,
+  updatedAt: citiesTable.updatedAt,
+} as const;
 
-/** Strip undefined values so Drizzle does not emit NULL for omitted fields. */
-function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined),
-  ) as Partial<T>;
+/**
+ * Builds an isActive condition from an ActiveFilter value.
+ * Returns undefined for "all" (no filtering needed).
+ */
+function activeCondition(
+  column: typeof citiesTable.isActive | typeof serviceableH3ZonesTable.isActive,
+  filter?: ActiveFilter,
+) {
+  if (filter === "active") return eq(column, true);
+  if (filter === "inactive") return eq(column, false);
+  return undefined; // "all" or undefined → no condition
 }
 
 // =============================================================================
-// 1 — CITY REPOSITORY
+// 1. CityRepository
 // =============================================================================
 
 export class CityRepository {
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
-  async findById(id: string): Promise<City | null> {
+  async findById(id: string): Promise<CityPublic | null> {
     const [row] = await this.db
-      .select()
+      .select(cityPublicColumns)
       .from(citiesTable)
       .where(eq(citiesTable.id, id))
       .limit(1);
@@ -60,9 +88,9 @@ export class CityRepository {
     return row ?? null;
   }
 
-  async findBySlug(slug: string): Promise<City | null> {
+  async findBySlug(slug: string): Promise<CityPublic | null> {
     const [row] = await this.db
-      .select()
+      .select(cityPublicColumns)
       .from(citiesTable)
       .where(eq(citiesTable.slug, slug))
       .limit(1);
@@ -70,112 +98,180 @@ export class CityRepository {
     return row ?? null;
   }
 
-  async list(opts: {
-    activeOnly?: boolean;
-    page?: number;
-    limit?: number;
-  } = {}): Promise<{ items: City[]; total: number }> {
-    const conditions = opts.activeOnly ? [eq(citiesTable.isActive, true)] : [];
-    const { limit, offset } = applyPagination(opts.limit ?? 50, opts.page ?? 1);
+  async list(
+    pagination: Pagination,
+    opts: { filter?: ActiveFilter; stateCode?: string } = {},
+  ): Promise<{ items: CityPublic[]; total: number }> {
+    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+
+    const cond = activeCondition(citiesTable.isActive, opts.filter);
+    const conditions = [];
+    if (cond) conditions.push(cond);
+    if (opts.stateCode) conditions.push(eq(citiesTable.stateCode, opts.stateCode));
+    const baseWhere = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const where = applyCursorPagination(
+      citiesTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+    const orderBy =
+      pagination.order === "asc" ? asc(citiesTable.id) : desc(citiesTable.id);
 
     const [countRow] = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(citiesTable)
-      .where(conditions.length ? and(...conditions) : undefined);
+      .where(baseWhere);
 
     const items = await this.db
-      .select()
+      .select(cityPublicColumns)
       .from(citiesTable)
-      .where(conditions.length ? and(...conditions) : undefined)
-      .orderBy(citiesTable.name)
+      .where(where)
+      .orderBy(orderBy)
       .limit(limit)
       .offset(offset);
 
     return { items, total: countRow?.count ?? 0 };
   }
 
-  async listByState(state: string, opts: { activeOnly?: boolean } = {}): Promise<City[]> {
-    const conditions = [eq(citiesTable.state, state)];
-    if (opts.activeOnly) conditions.push(eq(citiesTable.isActive, true));
+  async listWithBoundary(
+    pagination: Pagination,
+    opts: { filter?: ActiveFilter; stateCode?: string } = {},
+  ): Promise<{ items: CityMapItem[]; total: number }> {
+    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
 
-    return this.db
-      .select()
+    const cond = activeCondition(citiesTable.isActive, opts.filter);
+    const conditions = [];
+    if (cond) conditions.push(cond);
+    if (opts.stateCode) conditions.push(eq(citiesTable.stateCode, opts.stateCode));
+    const baseWhere = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const where = applyCursorPagination(
+      citiesTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+    const orderBy =
+      pagination.order === "asc" ? asc(citiesTable.id) : desc(citiesTable.id);
+
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
       .from(citiesTable)
-      .where(and(...conditions))
-      .orderBy(citiesTable.name);
+      .where(baseWhere);
+
+    const rows = await this.db.execute(sql`
+      SELECT
+        id, name, slug, state, state_code, district, country, country_code,
+        is_active, centroid_lat, centroid_lng, timezone, launched_at, metadata,
+        created_at, updated_at,
+        ST_AsGeoJSON(boundary)::jsonb AS boundary
+      FROM cities
+      WHERE ${where ?? sql`TRUE`}
+      ORDER BY ${orderBy}
+      LIMIT ${limit} OFFSET ${offset}
+    `);
+
+    return { items: rows.rows as CityMapItem[], total: countRow?.count ?? 0 };
   }
 
-  async create(data: CityInsert): Promise<City> {
+  // async listByState(
+  //   state: string,
+  //   opts: { filter?: ActiveFilter } = {},
+  // ): Promise<CityPublic[]> {
+  //   const conditions = [eq(citiesTable.state, state)];
+  //   const cond = activeCondition(citiesTable.isActive, opts.filter);
+  //   if (cond) conditions.push(cond);
+
+  //   return this.db
+  //     .select(cityPublicColumns)
+  //     .from(citiesTable)
+  //     .where(and(...conditions))
+  //     .orderBy(citiesTable.name);
+  // }
+
+  // async listByStateWithBoundary(
+  //   state: string,
+  //   opts: { filter?: ActiveFilter } = {},
+  // ): Promise<CityMapItem[]> {
+  //   const conditions = [sql`state = ${state}`];
+  //   if (opts.filter === "active") conditions.push(sql`is_active = true`);
+  //   if (opts.filter === "inactive") conditions.push(sql`is_active = false`);
+
+  //   const rows = await this.db.execute(sql`
+  //     SELECT
+  //       id, name, slug, state, state_code, district, country, country_code,
+  //       is_active, centroid_lat, centroid_lng, timezone, launched_at, metadata,
+  //       created_at, updated_at,
+  //       ST_AsGeoJSON(boundary)::jsonb AS boundary
+  //     FROM cities
+  //     WHERE ${and(...conditions)}
+  //   `);
+
+  //   return rows.rows as CityMapItem[];
+  // }
+
+  // create/update/setActive re-fetch after write to avoid hex WKB from PostGIS
+  async create(data: CityInsert): Promise<CityPublic> {
     const [row] = await this.db
       .insert(citiesTable)
       .values({ ...data, slug: data.slug.toLowerCase() })
-      .returning();
+      .returning({ id: citiesTable.id });
 
-    return row;
+    return this.findById(row.id) as Promise<CityPublic>;
   }
 
-  async update(id: string, data: CityUpdate): Promise<City | null> {
-    const [row] = await this.db
+  async update(id: string, data: CityUpdate): Promise<CityPublic | null> {
+    await this.db
       .update(citiesTable)
       .set({
         ...clean(data),
         ...(data.slug ? { slug: data.slug.toLowerCase() } : {}),
         updatedAt: new Date(),
       })
-      .where(eq(citiesTable.id, id))
-      .returning();
+      .where(eq(citiesTable.id, id));
 
-    return row ?? null;
+    return this.findById(id);
   }
 
-  async setActive(id: string, isActive: boolean): Promise<City | null> {
-    const [row] = await this.db
+  async setActive(id: string, isActive: boolean): Promise<CityPublic | null> {
+    await this.db
       .update(citiesTable)
       .set({ isActive, updatedAt: new Date() })
-      .where(eq(citiesTable.id, id))
-      .returning();
+      .where(eq(citiesTable.id, id));
 
-    return row ?? null;
+    return this.findById(id);
   }
 }
 
 // =============================================================================
-// 2 — SERVICEABLE PINCODE REPOSITORY
+// 2. ServiceableH3ZoneRepository
 // =============================================================================
 
-export class ServiceablePincodeRepository {
-  constructor(private readonly db: DB) {}
+export class ServiceableH3ZoneRepository {
+  constructor(private readonly db: DB) { }
 
-  async findById(id: string): Promise<ServiceablePincode | null> {
+  async findByH3Index(h3Index: string): Promise<ServiceableH3Zone | null> {
     const [row] = await this.db
       .select()
-      .from(serviceablePincodesTable)
-      .where(eq(serviceablePincodesTable.id, id))
-      .limit(1);
-
-    return row ?? null;
-  }
-
-  async findByPincode(pincode: string): Promise<ServiceablePincode | null> {
-    const [row] = await this.db
-      .select()
-      .from(serviceablePincodesTable)
-      .where(eq(serviceablePincodesTable.pincode, pincode))
-      .limit(1);
-
-    return row ?? null;
-  }
-
-  async findActiveByPincode(pincode: string): Promise<ServiceablePincode | null> {
-    const [row] = await this.db
-      .select()
-      .from(serviceablePincodesTable)
+      .from(serviceableH3ZonesTable)
       .where(
         and(
-          eq(serviceablePincodesTable.pincode, pincode),
-          eq(serviceablePincodesTable.isActive, true),
+          eq(serviceableH3ZonesTable.h3Index, h3Index),
+          eq(serviceableH3ZonesTable.isActive, true),
         ),
       )
+      .limit(1);
+
+    return row ?? null;
+  }
+
+  async findById(id: string): Promise<ServiceableH3Zone | null> {
+    const [row] = await this.db
+      .select()
+      .from(serviceableH3ZonesTable)
+      .where(eq(serviceableH3ZonesTable.id, id))
       .limit(1);
 
     return row ?? null;
@@ -183,73 +279,68 @@ export class ServiceablePincodeRepository {
 
   async listByCity(
     cityId: string,
-    opts: { activeOnly?: boolean; page?: number; limit?: number } = {},
-  ): Promise<{ items: ServiceablePincode[]; total: number }> {
-    const conditions = [eq(serviceablePincodesTable.cityId, cityId)];
-    if (opts.activeOnly)
-      conditions.push(eq(serviceablePincodesTable.isActive, true));
+    pagination: Pagination,
+    opts: { filter?: ActiveFilter } = {},
+  ): Promise<{ items: ServiceableH3Zone[]; total: number }> {
+    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
 
-    const { limit, offset } = applyPagination(opts.limit ?? 50, opts.page ?? 1);
+    const conditions = [eq(serviceableH3ZonesTable.cityId, cityId)];
+    const cond = activeCondition(serviceableH3ZonesTable.isActive, opts.filter);
+    if (cond) conditions.push(cond);
+
+    const baseWhere = and(...conditions);
+    const where = applyCursorPagination(
+      serviceableH3ZonesTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+    const orderBy =
+      pagination.order === "asc"
+        ? asc(serviceableH3ZonesTable.id)
+        : desc(serviceableH3ZonesTable.id);
 
     const [countRow] = await this.db
       .select({ count: sql<number>`count(*)::int` })
-      .from(serviceablePincodesTable)
-      .where(and(...conditions));
+      .from(serviceableH3ZonesTable)
+      .where(baseWhere);
 
     const items = await this.db
       .select()
-      .from(serviceablePincodesTable)
-      .where(and(...conditions))
-      .orderBy(serviceablePincodesTable.pincode)
+      .from(serviceableH3ZonesTable)
+      .where(where)
+      .orderBy(orderBy)
       .limit(limit)
       .offset(offset);
 
     return { items, total: countRow?.count ?? 0 };
   }
 
-  /**
-   * Checks whether a GPS coordinate falls within any active serviceable pincode
-   * boundary using ST_Within. Requires GIST index on `boundary`.
-   */
-  async findByCoordinates(
-    lat: number,
-    lng: number,
-  ): Promise<ServiceablePincode | null> {
+  async create(data: ServiceableH3ZoneInsert): Promise<ServiceableH3Zone> {
     const [row] = await this.db
-      .select()
-      .from(serviceablePincodesTable)
-      .where(
-        and(
-          eq(serviceablePincodesTable.isActive, true),
-          isNotNull(serviceablePincodesTable.boundary),
-          sql`ST_Within(
-            ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)::geometry,
-            ${serviceablePincodesTable.boundary}::geometry
-          )`,
-        ),
-      )
-      .limit(1);
-
-    return row ?? null;
-  }
-
-  async create(data: ServiceablePincodeInsert): Promise<ServiceablePincode> {
-    const [row] = await this.db
-      .insert(serviceablePincodesTable)
+      .insert(serviceableH3ZonesTable)
       .values(data)
       .returning();
 
     return row;
   }
 
+  async bulkCreate(data: ServiceableH3ZoneInsert[]): Promise<void> {
+    if (data.length === 0) return;
+    await this.db
+      .insert(serviceableH3ZonesTable)
+      .values(data)
+      .onConflictDoNothing();
+  }
+
   async update(
     id: string,
-    data: ServiceablePincodeUpdate,
-  ): Promise<ServiceablePincode | null> {
+    data: ServiceableH3ZoneUpdate,
+  ): Promise<ServiceableH3Zone | null> {
     const [row] = await this.db
-      .update(serviceablePincodesTable)
+      .update(serviceableH3ZonesTable)
       .set({ ...clean(data), updatedAt: new Date() })
-      .where(eq(serviceablePincodesTable.id, id))
+      .where(eq(serviceableH3ZonesTable.id, id))
       .returning();
 
     return row ?? null;
@@ -258,13 +349,183 @@ export class ServiceablePincodeRepository {
   async setActive(
     id: string,
     isActive: boolean,
-  ): Promise<ServiceablePincode | null> {
+  ): Promise<ServiceableH3Zone | null> {
     const [row] = await this.db
-      .update(serviceablePincodesTable)
+      .update(serviceableH3ZonesTable)
       .set({ isActive, updatedAt: new Date() })
-      .where(eq(serviceablePincodesTable.id, id))
+      .where(eq(serviceableH3ZonesTable.id, id))
       .returning();
 
     return row ?? null;
   }
+
+  async setActiveByCity(cityId: string, isActive: boolean): Promise<void> {
+    await this.db
+      .update(serviceableH3ZonesTable)
+      .set({ isActive, updatedAt: new Date() })
+      .where(eq(serviceableH3ZonesTable.cityId, cityId));
+  }
+
+  async deleteZonesByCityAndLabelPattern(
+    cityId: string,
+    labelPattern: string,
+  ): Promise<void> {
+    await this.db
+      .delete(serviceableH3ZonesTable)
+      .where(
+        and(
+          eq(serviceableH3ZonesTable.cityId, cityId),
+          sql`${serviceableH3ZonesTable.label} LIKE ${labelPattern}`,
+        ),
+      );
+  }
 }
+
+// =============================================================================
+// 3. ServiceablePincodeRepository
+// =============================================================================
+
+// export class ServiceablePincodeRepository {
+// constructor(private readonly db: DB) { }
+
+//   async findById(id: string): Promise<ServiceablePincode | null> {
+//     const [row] = await this.db
+//       .select()
+//       .from(serviceablePincodesTable)
+//       .where(eq(serviceablePincodesTable.id, id))
+//       .limit(1);
+
+//     return row ?? null;
+//   }
+
+//   async findByPincode(pincode: string): Promise<ServiceablePincode | null> {
+//     const [row] = await this.db
+//       .select()
+//       .from(serviceablePincodesTable)
+//       .where(eq(serviceablePincodesTable.pincode, pincode))
+//       .limit(1);
+
+//     return row ?? null;
+//   }
+
+//   async findActiveByPincode(pincode: string): Promise<ServiceablePincode | null> {
+//     const [row] = await this.db
+//       .select()
+//       .from(serviceablePincodesTable)
+//       .where(
+//         and(
+//           eq(serviceablePincodesTable.pincode, pincode),
+//           eq(serviceablePincodesTable.isActive, true),
+//         ),
+//       )
+//       .limit(1);
+
+//     return row ?? null;
+//   }
+
+//   async list(
+//     pagination: Pagination,
+//     opts: { filter?: ActiveFilter } = {},
+//   ): Promise<{ items: ServiceablePincode[]; total: number }> {
+//     const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+
+//     const where = applyCursorPagination(
+//       serviceablePincodesTable.id,
+//       pagination.cursor,
+//       pagination.order,
+//       baseWhere,
+//     );
+//     const orderBy =
+//       pagination.order === "asc"
+//         ? asc(serviceablePincodesTable.id)
+//         : desc(serviceablePincodesTable.id);
+
+//     const [countRow] = await this.db
+//       .select({ count: sql<number>`count(*)::int` })
+//       .from(serviceablePincodesTable)
+//       .where(baseWhere);
+
+//     const items = await this.db
+//       .select()
+//       .from(serviceablePincodesTable)
+//       .where(where)
+//       .orderBy(orderBy)
+//       .limit(limit)
+//       .offset(offset);
+
+//     return { items, total: countRow?.count ?? 0 };
+//   }
+
+//   async listByCity(
+//     cityId: string,
+//     pagination: Pagination,
+//     opts: { activeOnly?: boolean } = {},
+//   ): Promise<{ items: ServiceablePincode[]; total: number }> {
+//     const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+
+//     const conditions = [eq(serviceablePincodesTable.cityId, cityId)];
+//     if (opts.activeOnly) conditions.push(eq(serviceablePincodesTable.isActive, true));
+
+//     const baseWhere = and(...conditions);
+//     const where = applyCursorPagination(
+//       serviceablePincodesTable.id,
+//       pagination.cursor,
+//       pagination.order,
+//       baseWhere,
+//     );
+//     const orderBy =
+//       pagination.order === "asc"
+//         ? asc(serviceablePincodesTable.id)
+//         : desc(serviceablePincodesTable.id);
+
+//     const [countRow] = await this.db
+//       .select({ count: sql<number>`count(*)::int` })
+//       .from(serviceablePincodesTable)
+//       .where(baseWhere);
+
+//     const items = await this.db
+//       .select()
+//       .from(serviceablePincodesTable)
+//       .where(where)
+//       .orderBy(orderBy)
+//       .limit(limit)
+//       .offset(offset);
+
+//     return { items, total: countRow?.count ?? 0 };
+//   }
+
+//   async create(data: ServiceablePincodeInsert): Promise<ServiceablePincode> {
+//     const [row] = await this.db
+//       .insert(serviceablePincodesTable)
+//       .values(data)
+//       .returning();
+
+//     return row;
+//   }
+
+//   async update(
+//     id: string,
+//     data: ServiceablePincodeUpdate,
+//   ): Promise<ServiceablePincode | null> {
+//     const [row] = await this.db
+//       .update(serviceablePincodesTable)
+//       .set({ ...clean(data), updatedAt: new Date() })
+//       .where(eq(serviceablePincodesTable.id, id))
+//       .returning();
+
+//     return row ?? null;
+//   }
+
+//   async setActive(
+//     id: string,
+//     isActive: boolean,
+//   ): Promise<ServiceablePincode | null> {
+//     const [row] = await this.db
+//       .update(serviceablePincodesTable)
+//       .set({ isActive, updatedAt: new Date() })
+//       .where(eq(serviceablePincodesTable.id, id))
+//       .returning();
+
+//     return row ?? null;
+//   }
+// }

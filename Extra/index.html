@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Gavero H3 Explorer</title>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;800&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #070d1a;
+            --surface: rgba(10, 20, 40, 0.92);
+            --border: rgba(56, 189, 248, 0.15);
+            --accent: #38bdf8;
+            --accent2: #818cf8;
+            --green: #10b981;
+            --red: #f43f5e;
+            --amber: #f59e0b;
+            --text: #e2e8f0;
+            --muted: #64748b;
+            --mono: 'JetBrains Mono', monospace;
+            --display: 'Syne', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--display);
+            overflow: hidden;
+        }
+
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+
+        /* Sidebar */
+        #sidebar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: 320px;
+            z-index: 1000;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            backdrop-filter: blur(20px);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.05), rgba(129, 140, 248, 0.05));
+        }
+
+        .logo-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .app-title {
+            font-size: 1.15rem;
+            font-weight: 800;
+            color: var(--accent);
+            letter-spacing: -0.02em;
+        }
+
+        .app-subtitle {
+            font-size: 0.72rem;
+            color: var(--muted);
+            font-family: var(--mono);
+            letter-spacing: 0.05em;
+        }
+
+        /* Global stats strip */
+        .stats-strip {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .stat-cell {
+            padding: 12px 10px;
+            text-align: center;
+            border-right: 1px solid var(--border);
+        }
+
+        .stat-cell:last-child {
+            border-right: none;
+        }
+
+        .stat-value {
+            font-size: 1.3rem;
+            font-weight: 800;
+            color: var(--accent);
+            font-family: var(--mono);
+        }
+
+        .stat-label {
+            font-size: 0.6rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-top: 2px;
+        }
+
+        /* City list */
+        .section-title {
+            padding: 12px 18px 6px;
+            font-size: 0.65rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-family: var(--mono);
+        }
+
+        .city-list {
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .city-item {
+            padding: 12px 18px;
+            border-bottom: 1px solid rgba(56, 189, 248, 0.06);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .city-item:hover {
+            background: rgba(56, 189, 248, 0.06);
+        }
+
+        .city-item.selected {
+            background: rgba(56, 189, 248, 0.1);
+            border-left: 3px solid var(--accent);
+        }
+
+        .city-name {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .city-badge {
+            font-size: 0.6rem;
+            font-family: var(--mono);
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .badge-active {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--green);
+        }
+
+        .badge-inactive {
+            background: rgba(244, 63, 94, 0.15);
+            color: var(--red);
+        }
+
+        .badge-partial {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--amber);
+        }
+
+        .city-meta {
+            font-size: 0.72rem;
+            color: var(--muted);
+            font-family: var(--mono);
+            margin-top: 4px;
+            display: flex;
+            gap: 12px;
+        }
+
+        .zone-bar {
+            height: 3px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 2px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .zone-fill {
+            height: 100%;
+            border-radius: 2px;
+            background: linear-gradient(90deg, var(--green), var(--accent));
+        }
+
+        /* Zone detail panel */
+        #detail-panel {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            width: 270px;
+            z-index: 1000;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            backdrop-filter: blur(20px);
+            display: none;
+            overflow: hidden;
+        }
+
+        .detail-header {
+            padding: 14px 16px;
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.08), rgba(129, 140, 248, 0.05));
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .detail-title {
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--accent);
+            font-family: var(--mono);
+        }
+
+        #close-detail {
+            background: none;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 1.1rem;
+            line-height: 1;
+            transition: color 0.15s;
+        }
+
+        #close-detail:hover {
+            color: var(--text);
+        }
+
+        .detail-body {
+            padding: 14px 16px;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            font-size: 0.75rem;
+        }
+
+        .detail-row:last-child {
+            border-bottom: none;
+        }
+
+        .detail-key {
+            color: var(--muted);
+            font-family: var(--mono);
+        }
+
+        .detail-val {
+            color: var(--text);
+            font-weight: 600;
+            font-family: var(--mono);
+        }
+
+        /* Top bar */
+        #topbar {
+            position: absolute;
+            top: 12px;
+            left: 340px;
+            right: 290px;
+            z-index: 1000;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .filter-btn {
+            padding: 7px 14px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--muted);
+            font-size: 0.72rem;
+            font-family: var(--mono);
+            font-weight: 600;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            transition: all 0.15s;
+        }
+
+        .filter-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .filter-btn.active {
+            background: rgba(56, 189, 248, 0.12);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        /* Pulse dot */
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 4px;
+        }
+
+        .pulse-green {
+            background: var(--green);
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+            animation: pulse-g 2s infinite;
+        }
+
+        .pulse-red {
+            background: var(--red);
+        }
+
+        @keyframes pulse-g {
+            0% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+
+        /* Leaflet popup override */
+        .leaflet-popup-content-wrapper {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            backdrop-filter: blur(20px);
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            padding: 0;
+        }
+
+        .leaflet-popup-content {
+            margin: 12px 14px;
+        }
+
+        .leaflet-popup-tip {
+            background: var(--surface);
+        }
+
+        .leaflet-popup-close-button {
+            color: var(--muted) !important;
+            top: 6px !important;
+            right: 8px !important;
+        }
+
+        /* Scrollbar */
+        .city-list::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .city-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .city-list::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 2px;
+        }
+
+        /* Legend */
+        #legend {
+            position: absolute;
+            bottom: 20px;
+            right: 12px;
+            z-index: 1000;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            backdrop-filter: blur(20px);
+            font-size: 0.7rem;
+            font-family: var(--mono);
+        }
+
+        .legend-title {
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 8px;
+            font-size: 0.62rem;
+        }
+
+        .legend-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+            color: var(--text);
+        }
+
+        .legend-swatch {
+            width: 24px;
+            height: 3px;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo-row">
+                <div class="logo-icon">⬡</div>
+                <div>
+                    <div class="app-title">GAVERO H3</div>
+                    <div class="app-subtitle">Zone Intelligence Platform</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-strip">
+            <div class="stat-cell">
+                <div class="stat-value" id="stat-cities">0</div>
+                <div class="stat-label">Cities</div>
+            </div>
+            <div class="stat-cell">
+                <div class="stat-value" id="stat-zones">0</div>
+                <div class="stat-label">Zones</div>
+            </div>
+            <div class="stat-cell">
+                <div class="stat-value" id="stat-active">0%</div>
+                <div class="stat-label">Coverage</div>
+            </div>
+        </div>
+
+        <div class="section-title">Cities · H3 r7 Zones</div>
+
+        <div class="city-list" id="city-list"></div>
+    </div>
+
+    <div id="topbar">
+        <button class="filter-btn active" data-filter="all" onclick="setFilter(this,'all')">All Zones</button>
+        <button class="filter-btn" data-filter="active" onclick="setFilter(this,'active')">Active</button>
+        <button class="filter-btn" data-filter="inactive" onclick="setFilter(this,'inactive')">Inactive</button>
+    </div>
+
+    <div id="map"></div>
+
+    <div id="detail-panel">
+        <div class="detail-header">
+            <span class="detail-title" id="detail-h3">—</span>
+            <button id="close-detail" onclick="closeDetail()">✕</button>
+        </div>
+        <div class="detail-body" id="detail-body"></div>
+    </div>
+
+    <div id="legend">
+        <div class="legend-title">Legend</div>
+        <div class="legend-row"><span class="legend-swatch"
+                style="background:#38bdf8;opacity:0.6;height:2px;border-style:dashed"></span>City Boundary</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:#10b981"></span><span
+                class="pulse-dot pulse-green"></span>Active Zone</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:#f43f5e"></span><span
+                class="pulse-dot pulse-red"></span>Inactive Zone</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:#f59e0b"></span>⬡ Partial Zone</div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // ────────────────────────────────────────────────────
+        // BACKEND DATA (mocked from CityController + ServiceableZoneController)
+        // ────────────────────────────────────────────────────
+
+        const CITIES = [
+            {
+                id: "city_indore",
+                name: "Indore",
+                state: "Madhya Pradesh",
+                center: [22.7196, 75.8577],
+                isActive: true,
+                boundary: [
+                    [22.810, 75.780], [22.830, 75.830], [22.820, 75.900],
+                    [22.790, 75.960], [22.750, 75.990], [22.700, 75.980],
+                    [22.650, 75.940], [22.620, 75.870], [22.640, 75.790],
+                    [22.690, 75.740], [22.750, 75.730], [22.810, 75.780]
+                ],
+                zones: [
+                    { h3Index: "87283472fffffff", isActive: true, status: "active", label: "Vijay Nagar", demand: 92, supply: 88, boundary: [[22.745, 75.855], [22.755, 75.862], [22.750, 75.873], [22.738, 75.872], [22.733, 75.861], [22.739, 75.853]] },
+                    { h3Index: "872834721ffffff", isActive: true, status: "active", label: "Palasia", demand: 78, supply: 72, boundary: [[22.730, 75.872], [22.740, 75.880], [22.735, 75.891], [22.723, 75.890], [22.718, 75.879], [22.724, 75.871]] },
+                    { h3Index: "872834723ffffff", isActive: false, status: "inactive", label: "Rajwada", demand: 0, supply: 0, boundary: [[22.718, 75.856], [22.728, 75.864], [22.723, 75.875], [22.711, 75.874], [22.706, 75.863], [22.712, 75.855]] },
+                    { h3Index: "872834725ffffff", isActive: true, status: "active", label: "Scheme 54", demand: 65, supply: 60, boundary: [[22.758, 75.874], [22.768, 75.882], [22.763, 75.893], [22.751, 75.892], [22.746, 75.881], [22.752, 75.873]] },
+                    { h3Index: "872834727ffffff", isActive: false, status: "partial", label: "Aerodrome Rd", demand: 30, supply: 10, boundary: [[22.700, 75.860], [22.710, 75.868], [22.705, 75.879], [22.693, 75.878], [22.688, 75.867], [22.694, 75.859]] },
+                    { h3Index: "872834729ffffff", isActive: true, status: "active", label: "Bhawarkuan", demand: 83, supply: 80, boundary: [[22.678, 75.848], [22.688, 75.856], [22.683, 75.867], [22.671, 75.866], [22.666, 75.855], [22.672, 75.847]] },
+                    { h3Index: "87283472bffffff", isActive: true, status: "active", label: "Sanyogitaganj", demand: 71, supply: 68, boundary: [[22.741, 75.838], [22.751, 75.846], [22.746, 75.857], [22.734, 75.856], [22.729, 75.845], [22.735, 75.837]] },
+                    { h3Index: "87283472dffffff", isActive: false, status: "inactive", label: "Khajrana", demand: 0, supply: 0, boundary: [[22.760, 75.895], [22.770, 75.903], [22.765, 75.914], [22.753, 75.913], [22.748, 75.902], [22.754, 75.894]] },
+                    { h3Index: "87283472effffff", isActive: true, status: "partial", label: "Annapurna", demand: 44, supply: 28, boundary: [[22.690, 75.880], [22.700, 75.888], [22.695, 75.899], [22.683, 75.898], [22.678, 75.887], [22.684, 75.879]] },
+                    { h3Index: "872834720ffffff", isActive: true, status: "active", label: "MG Road", demand: 95, supply: 91, boundary: [[22.720, 75.843], [22.730, 75.851], [22.725, 75.862], [22.713, 75.861], [22.708, 75.850], [22.714, 75.842]] },
+                ]
+            },
+            {
+                id: "city_bhopal",
+                name: "Bhopal",
+                state: "Madhya Pradesh",
+                center: [23.2599, 77.4126],
+                isActive: true,
+                boundary: [
+                    [23.350, 77.330], [23.370, 77.390], [23.360, 77.460],
+                    [23.320, 77.510], [23.270, 77.530], [23.220, 77.510],
+                    [23.170, 77.460], [23.160, 77.380], [23.190, 77.310],
+                    [23.240, 77.280], [23.310, 77.290], [23.350, 77.330]
+                ],
+                zones: [
+                    { h3Index: "873b10e07ffffff", isActive: true, status: "active", label: "New Market", demand: 88, supply: 85, boundary: [[23.235, 77.400], [23.245, 77.408], [23.240, 77.419], [23.228, 77.418], [23.223, 77.407], [23.229, 77.399]] },
+                    { h3Index: "873b10e01ffffff", isActive: true, status: "active", label: "MP Nagar", demand: 80, supply: 76, boundary: [[23.220, 77.416], [23.230, 77.424], [23.225, 77.435], [23.213, 77.434], [23.208, 77.423], [23.214, 77.415]] },
+                    { h3Index: "873b10e03ffffff", isActive: false, status: "inactive", label: "Bhopal Jn Area", demand: 0, supply: 0, boundary: [[23.260, 77.408], [23.270, 77.416], [23.265, 77.427], [23.253, 77.426], [23.248, 77.415], [23.254, 77.407]] },
+                    { h3Index: "873b10e05ffffff", isActive: true, status: "partial", label: "Arera Colony", demand: 55, supply: 40, boundary: [[23.218, 77.435], [23.228, 77.443], [23.223, 77.454], [23.211, 77.453], [23.206, 77.442], [23.212, 77.434]] },
+                    { h3Index: "873b10e09ffffff", isActive: true, status: "active", label: "Habibganj", demand: 72, supply: 70, boundary: [[23.245, 77.417], [23.255, 77.425], [23.250, 77.436], [23.238, 77.435], [23.233, 77.424], [23.239, 77.416]] },
+                    { h3Index: "873b10e0bffffff", isActive: false, status: "inactive", label: "Kolar Road", demand: 0, supply: 0, boundary: [[23.190, 77.445], [23.200, 77.453], [23.195, 77.464], [23.183, 77.463], [23.178, 77.452], [23.184, 77.444]] },
+                    { h3Index: "873b10e0dffffff", isActive: true, status: "active", label: "Shyamla Hills", demand: 62, supply: 58, boundary: [[23.268, 77.421], [23.278, 77.429], [23.273, 77.440], [23.261, 77.439], [23.256, 77.428], [23.262, 77.420]] },
+                ]
+            },
+            {
+                id: "city_pune",
+                name: "Pune",
+                state: "Maharashtra",
+                center: [18.5204, 73.8567],
+                isActive: true,
+                boundary: [
+                    [18.620, 73.760], [18.640, 73.820], [18.630, 73.900],
+                    [18.590, 73.960], [18.540, 73.980], [18.480, 73.950],
+                    [18.440, 73.880], [18.450, 73.800], [18.490, 73.740],
+                    [18.550, 73.720], [18.600, 73.730], [18.620, 73.760]
+                ],
+                zones: [
+                    { h3Index: "87193481fffffff", isActive: true, status: "active", label: "Koregaon Park", demand: 96, supply: 94, boundary: [[18.535, 73.892], [18.545, 73.900], [18.540, 73.911], [18.528, 73.910], [18.523, 73.899], [18.529, 73.891]] },
+                    { h3Index: "871934813ffffff", isActive: true, status: "active", label: "Kalyani Nagar", demand: 90, supply: 87, boundary: [[18.550, 73.906], [18.560, 73.914], [18.555, 73.925], [18.543, 73.924], [18.538, 73.913], [18.544, 73.905]] },
+                    { h3Index: "871934815ffffff", isActive: true, status: "active", label: "Baner", demand: 82, supply: 78, boundary: [[18.558, 73.776], [18.568, 73.784], [18.563, 73.795], [18.551, 73.794], [18.546, 73.783], [18.552, 73.775]] },
+                    { h3Index: "871934817ffffff", isActive: false, status: "inactive", label: "Hadapsar", demand: 0, supply: 0, boundary: [[18.503, 73.918], [18.513, 73.926], [18.508, 73.937], [18.496, 73.936], [18.491, 73.925], [18.497, 73.917]] },
+                    { h3Index: "871934819ffffff", isActive: true, status: "partial", label: "Kothrud", demand: 48, supply: 32, boundary: [[18.505, 73.818], [18.515, 73.826], [18.510, 73.837], [18.498, 73.836], [18.493, 73.825], [18.499, 73.817]] },
+                    { h3Index: "87193481bffffff", isActive: true, status: "active", label: "Shivajinagar", demand: 88, supply: 84, boundary: [[18.528, 73.840], [18.538, 73.848], [18.533, 73.859], [18.521, 73.858], [18.516, 73.847], [18.522, 73.839]] },
+                    { h3Index: "87193481dffffff", isActive: false, status: "partial", label: "Wakad", demand: 35, supply: 18, boundary: [[18.590, 73.764], [18.600, 73.772], [18.595, 73.783], [18.583, 73.782], [18.578, 73.771], [18.584, 73.763]] },
+                    { h3Index: "87193481effffff", isActive: true, status: "active", label: "Viman Nagar", demand: 75, supply: 72, boundary: [[18.563, 73.912], [18.573, 73.920], [18.568, 73.931], [18.556, 73.930], [18.551, 73.919], [18.557, 73.911]] },
+                ]
+            },
+            {
+                id: "city_surat",
+                name: "Surat",
+                state: "Gujarat",
+                center: [21.1702, 72.8311],
+                isActive: false,
+                boundary: [
+                    [21.250, 72.770], [21.270, 72.820], [21.260, 72.890],
+                    [21.220, 72.920], [21.170, 72.930], [21.120, 72.900],
+                    [21.090, 72.840], [21.100, 72.770], [21.140, 72.730],
+                    [21.190, 72.720], [21.230, 72.730], [21.250, 72.770]
+                ],
+                zones: [
+                    { h3Index: "872ab5c2fffffff", isActive: false, status: "inactive", label: "Adajan", demand: 0, supply: 0, boundary: [[21.205, 72.805], [21.215, 72.813], [21.210, 72.824], [21.198, 72.823], [21.193, 72.812], [21.199, 72.804]] },
+                    { h3Index: "872ab5c21ffffff", isActive: false, status: "inactive", label: "Vesu", demand: 0, supply: 0, boundary: [[21.170, 72.791], [21.180, 72.799], [21.175, 72.810], [21.163, 72.809], [21.158, 72.798], [21.164, 72.790]] },
+                    { h3Index: "872ab5c23ffffff", isActive: false, status: "partial", label: "Athwa", demand: 0, supply: 0, boundary: [[21.188, 72.819], [21.198, 72.827], [21.193, 72.838], [21.181, 72.837], [21.176, 72.826], [21.182, 72.818]] },
+                ]
+            },
+            {
+                id: "city_jaipur",
+                name: "Jaipur",
+                state: "Rajasthan",
+                center: [26.9124, 75.7873],
+                isActive: true,
+                boundary: [
+                    [27.020, 75.700], [27.040, 75.760], [27.030, 75.840],
+                    [26.990, 75.900], [26.940, 75.920], [26.880, 75.890],
+                    [26.840, 75.820], [26.850, 75.730], [26.890, 75.670],
+                    [26.940, 75.650], [26.990, 75.660], [27.020, 75.700]
+                ],
+                zones: [
+                    { h3Index: "8730e1c4fffffff", isActive: true, status: "active", label: "Malviya Nagar", demand: 85, supply: 81, boundary: [[26.860, 75.800], [26.870, 75.808], [26.865, 75.819], [26.853, 75.818], [26.848, 75.807], [26.854, 75.799]] },
+                    { h3Index: "8730e1c41ffffff", isActive: true, status: "active", label: "C-Scheme", demand: 90, supply: 88, boundary: [[26.908, 75.801], [26.918, 75.809], [26.913, 75.820], [26.901, 75.819], [26.896, 75.808], [26.902, 75.800]] },
+                    { h3Index: "8730e1c43ffffff", isActive: false, status: "inactive", label: "Mansarovar", demand: 0, supply: 0, boundary: [[26.865, 75.760], [26.875, 75.768], [26.870, 75.779], [26.858, 75.778], [26.853, 75.767], [26.859, 75.759]] },
+                    { h3Index: "8730e1c45ffffff", isActive: true, status: "partial", label: "Vaishali Nagar", demand: 55, supply: 42, boundary: [[26.920, 75.742], [26.930, 75.750], [26.925, 75.761], [26.913, 75.760], [26.908, 75.749], [26.914, 75.741]] },
+                    { h3Index: "8730e1c47ffffff", isActive: true, status: "active", label: "Tonk Road", demand: 70, supply: 66, boundary: [[26.873, 75.820], [26.883, 75.828], [26.878, 75.839], [26.866, 75.838], [26.861, 75.827], [26.867, 75.819]] },
+                    { h3Index: "8730e1c49ffffff", isActive: true, status: "active", label: "Pink City", demand: 93, supply: 90, boundary: [[26.922, 75.813], [26.932, 75.821], [26.927, 75.832], [26.915, 75.831], [26.910, 75.820], [26.916, 75.812]] },
+                ]
+            },
+            {
+                id: "city_nagpur",
+                name: "Nagpur",
+                state: "Maharashtra",
+                center: [21.1458, 79.0882],
+                isActive: true,
+                boundary: [
+                    [21.230, 79.020], [21.250, 79.060], [21.245, 79.130],
+                    [21.210, 79.170], [21.160, 79.180], [21.110, 79.150],
+                    [21.080, 79.090], [21.090, 79.020], [21.130, 78.970],
+                    [21.180, 78.960], [21.220, 78.980], [21.230, 79.020]
+                ],
+                zones: [
+                    { h3Index: "870e57803ffffff", isActive: true, status: "active", label: "Dharampeth", demand: 80, supply: 76, boundary: [[21.148, 79.073], [21.158, 79.081], [21.153, 79.092], [21.141, 79.091], [21.136, 79.080], [21.142, 79.072]] },
+                    { h3Index: "870e57805ffffff", isActive: true, status: "active", label: "Sitabuldi", demand: 87, supply: 84, boundary: [[21.148, 79.088], [21.158, 79.096], [21.153, 79.107], [21.141, 79.106], [21.136, 79.095], [21.142, 79.087]] },
+                    { h3Index: "870e57807ffffff", isActive: false, status: "inactive", label: "Itwari", demand: 0, supply: 0, boundary: [[21.162, 79.103], [21.172, 79.111], [21.167, 79.122], [21.155, 79.121], [21.150, 79.110], [21.156, 79.102]] },
+                    { h3Index: "870e57809ffffff", isActive: true, status: "partial", label: "Wardha Road", demand: 40, supply: 25, boundary: [[21.100, 79.085], [21.110, 79.093], [21.105, 79.104], [21.093, 79.103], [21.088, 79.092], [21.094, 79.084]] },
+                    { h3Index: "870e5780bffffff", isActive: true, status: "active", label: "Sadar", demand: 74, supply: 71, boundary: [[21.162, 79.073], [21.172, 79.081], [21.167, 79.092], [21.155, 79.091], [21.150, 79.080], [21.156, 79.072]] },
+                ]
+            }
+        ];
+
+        // ────────────────────────────────────────────────────
+        // MAP INIT
+        // ────────────────────────────────────────────────────
+
+        const map = L.map('map', { zoomControl: false }).setView([22.9, 78.5], 5);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '© CARTO'
+        }).addTo(map);
+
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        // ────────────────────────────────────────────────────
+        // STATE
+        // ────────────────────────────────────────────────────
+
+        let currentFilter = 'all';
+        let selectedCityId = null;
+        const layerGroups = {}; // cityId -> { boundary, zones: [layers] }
+
+        // ────────────────────────────────────────────────────
+        // RENDER
+        // ────────────────────────────────────────────────────
+
+        function colorForZone(zone) {
+            if (zone.status === 'active') return '#10b981';
+            if (zone.status === 'inactive') return '#f43f5e';
+            return '#f59e0b';
+        }
+
+        function shouldShowZone(zone) {
+            if (currentFilter === 'all') return true;
+            if (currentFilter === 'active') return zone.isActive;
+            if (currentFilter === 'inactive') return !zone.isActive;
+            return true;
+        }
+
+        function renderAll() {
+            // Clear existing layers
+            Object.values(layerGroups).forEach(g => {
+                g.boundary.remove();
+                g.zones.forEach(l => l.remove());
+            });
+
+            CITIES.forEach(city => {
+                // City boundary
+                const boundaryLayer = L.polygon(city.boundary, {
+                    color: '#38bdf8',
+                    fillColor: '#38bdf8',
+                    fillOpacity: city.isActive ? 0.03 : 0.01,
+                    weight: 1.5,
+                    dashArray: '6, 4'
+                }).addTo(map).bindPopup(`
+            <b style="color:#38bdf8">${city.name}</b><br>
+            <span style="color:#64748b">${city.state}</span><br>
+            Status: <b>${city.isActive ? '<span style="color:#10b981">Active</span>' : '<span style="color:#f43f5e">Inactive</span>'}</b>
+        `);
+
+                // Zones
+                const zoneLayers = [];
+                city.zones.forEach(zone => {
+                    if (!shouldShowZone(zone)) return;
+                    const color = colorForZone(zone);
+                    const layer = L.polygon(zone.boundary, {
+                        color: color,
+                        fillColor: color,
+                        fillOpacity: 0.25,
+                        weight: 1
+                    }).addTo(map);
+
+                    layer.on('click', () => showDetail(zone, city));
+                    layer.on('mouseover', function () {
+                        this.setStyle({ fillOpacity: 0.45, weight: 2 });
+                    });
+                    layer.on('mouseout', function () {
+                        this.setStyle({ fillOpacity: 0.25, weight: 1 });
+                    });
+
+                    zoneLayers.push(layer);
+                });
+
+                layerGroups[city.id] = { boundary: boundaryLayer, zones: zoneLayers };
+            });
+        }
+
+        // ────────────────────────────────────────────────────
+        // SIDEBAR
+        // ────────────────────────────────────────────────────
+
+        function buildSidebar() {
+            const list = document.getElementById('city-list');
+            list.innerHTML = '';
+
+            let totalZones = 0, totalActive = 0;
+
+            CITIES.forEach(city => {
+                const activeZones = city.zones.filter(z => z.isActive).length;
+                const pct = Math.round((activeZones / city.zones.length) * 100);
+                totalZones += city.zones.length;
+                totalActive += activeZones;
+
+                const cityStatus = !city.isActive ? 'inactive' : pct === 100 ? 'active' : 'partial';
+
+                const item = document.createElement('div');
+                item.className = 'city-item';
+                item.dataset.cityId = city.id;
+                item.innerHTML = `
+            <div class="city-name">
+                ${city.name}
+                <span class="city-badge badge-${cityStatus}">${cityStatus}</span>
+            </div>
+            <div class="city-meta">
+                <span>${city.zones.length} zones</span>
+                <span style="color:${colorForZone({ status: cityStatus })}">${activeZones} active</span>
+                <span>${city.state}</span>
+            </div>
+            <div class="zone-bar">
+                <div class="zone-fill" style="width:${pct}%"></div>
+            </div>
+        `;
+
+                item.addEventListener('click', () => flyToCity(city));
+                list.appendChild(item);
+            });
+
+            document.getElementById('stat-cities').textContent = CITIES.length;
+            document.getElementById('stat-zones').textContent = totalZones;
+            const coverage = Math.round((totalActive / totalZones) * 100);
+            document.getElementById('stat-active').textContent = coverage + '%';
+        }
+
+        function flyToCity(city) {
+            map.flyTo(city.center, 13, { duration: 1.2 });
+            selectedCityId = city.id;
+            document.querySelectorAll('.city-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.cityId === city.id);
+            });
+        }
+
+        // ────────────────────────────────────────────────────
+        // DETAIL PANEL
+        // ────────────────────────────────────────────────────
+
+        function showDetail(zone, city) {
+            const panel = document.getElementById('detail-panel');
+            document.getElementById('detail-h3').textContent = zone.h3Index;
+
+            const statusColor = colorForZone(zone);
+            const rows = [
+                ['Label', zone.label],
+                ['City', city.name],
+                ['Status', `<span style="color:${statusColor};font-weight:700">${zone.status.toUpperCase()}</span>`],
+                ['H3 Resolution', 'r7'],
+                ['Demand Score', zone.isActive ? zone.demand + '%' : '—'],
+                ['Supply Score', zone.isActive ? zone.supply + '%' : '—'],
+            ];
+
+            document.getElementById('detail-body').innerHTML = rows.map(([k, v]) => `
+        <div class="detail-row">
+            <span class="detail-key">${k}</span>
+            <span class="detail-val">${v}</span>
+        </div>
+    `).join('');
+
+            panel.style.display = 'block';
+        }
+
+        function closeDetail() {
+            document.getElementById('detail-panel').style.display = 'none';
+        }
+
+        // ────────────────────────────────────────────────────
+        // FILTER
+        // ────────────────────────────────────────────────────
+
+        function setFilter(btn, filter) {
+            currentFilter = filter;
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            renderAll();
+        }
+
+        // ────────────────────────────────────────────────────
+        // BOOT
+        // ────────────────────────────────────────────────────
+
+        buildSidebar();
+        renderAll();
+    </script>
+</body>
+
+</html>

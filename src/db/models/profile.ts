@@ -13,7 +13,7 @@ import {
 } from "../shared/enums";
 
 // =============================================================================
-// SECTION 5 — BANK ACCOUNTS
+// SECTION 1 — BANK ACCOUNTS
 // Shared by shop owners and delivery partners for payouts.
 // Account numbers are AES-256-GCM encrypted at rest; only last 4 digits
 // are stored in plaintext for display.

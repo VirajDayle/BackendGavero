@@ -4,28 +4,6 @@
  * Data-access layer for the profile domain — one repository class per
  * aggregate root, following the same conventions as auth.repository.ts.
  *
- * Repositories:
- *   1.  CityRepository
- *   2.  ServiceablePincodeRepository
- *   3.  BankAccountRepository
- *   4.  KycDocumentRepository
- *   5.  AddressRepository
- *   6.  ShopOwnerProfileRepository
- *   7.  DeliveryPartnerProfileRepository
- *   8.  CustomerProfileRepository
- *
- * ─── Conventions ─────────────────────────────────────────────────────────────
- *   • All write methods use .returning() — callers always get the persisted row.
- *   • Soft-deleted rows (deletedAt IS NOT NULL) are excluded by default;
- *     pass { includeDeleted: true } to override where applicable.
- *   • onConflictDoNothing() returns undefined on conflict; all such methods
- *     are typed Promise<T | null> and return null on conflict.
- *   • Monetary counters (totalEarnings, totalSpend, loyaltyPoints) are
- *     incremented atomically via sql`` expressions — never read-modify-write.
- *   • PostGIS write helpers accept { lat, lng } objects and emit the correct
- *     ST_SetSRID(ST_MakePoint(...)) literal internally.
- *   • No business logic lives here — only queries. Validation, auth checks,
- *     and workflow orchestration belong in the service layer.
  */
 
 import {
@@ -42,108 +20,143 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import type { InferInsertModel, InferSelectModel } from "drizzle-orm";
-import type { DB } from "../../db/index";
-import type { Pagination } from "./profile.schema";
 
+import type { DB } from "../../db/index";
 import {
   addressesTable,
   bankAccountsTable,
+  citiesTable,
   customerProfileTable,
   deliveryPartnerProfileTable,
   kycDocumentsTable,
+  serviceablePincodesTable,
   shopOwnerProfileTable,
 } from "../../db/schema";
 
+import type {
+  Address,
+  AddressInsert,
+  BankAccount,
+  BankAccountInsert,
+  City,
+  CityInsert,
+  CustomerProfile,
+  CustomerProfileInsert,
+  DeliveryPartnerProfile,
+  DeliveryPartnerProfileInsert,
+  KycDocument,
+  KycDocumentInsert,
+  ServiceablePincode,
+  ServiceablePincodeInsert,
+  ShopOwnerProfile,
+  ShopOwnerProfileInsert,
+} from "../../db/schema";
+
+// ---------------------------------------------------------------------------
+import type { Pagination } from "./profile.schema";
+import { clean, applyPagination, applyCursorPagination } from "../../shared";
+
 // =============================================================================
-// ROW TYPES
+// Helpers
 // =============================================================================
 
-type BankAccount = InferSelectModel<typeof bankAccountsTable>;
-type BankAccountInsert = InferInsertModel<typeof bankAccountsTable>;
 type BankAccountUpdate = Partial<BankAccountInsert>;
-
-type KycDocument = InferSelectModel<typeof kycDocumentsTable>;
-type KycDocumentInsert = InferInsertModel<typeof kycDocumentsTable>;
 type KycDocumentUpdate = Partial<KycDocumentInsert>;
-
-type Address = InferSelectModel<typeof addressesTable>;
-type AddressInsert = InferInsertModel<typeof addressesTable>;
 type AddressUpdate = Partial<AddressInsert>;
-
-type ShopOwnerProfile = InferSelectModel<typeof shopOwnerProfileTable>;
-type ShopOwnerProfileInsert = InferInsertModel<typeof shopOwnerProfileTable>;
 type ShopOwnerProfileUpdate = Partial<ShopOwnerProfileInsert>;
-
-type DeliveryPartnerProfile = InferSelectModel<typeof deliveryPartnerProfileTable>;
-type DeliveryPartnerProfileInsert = InferInsertModel<typeof deliveryPartnerProfileTable>;
 type DeliveryPartnerProfileUpdate = Partial<DeliveryPartnerProfileInsert>;
-
-type CustomerProfile = InferSelectModel<typeof customerProfileTable>;
-type CustomerProfileInsert = InferInsertModel<typeof customerProfileTable>;
 type CustomerProfileUpdate = Partial<CustomerProfileInsert>;
 
-// =============================================================================
-// HELPERS
-// =============================================================================
-
-/** Strip undefined values so Drizzle does not emit NULL for omitted fields. */
-function clean<T extends Record<string, unknown>>(obj: T): Partial<T> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined),
-  ) as Partial<T>;
-}
-
-function applyPagination(limit: number, page: number) {
-  return { limit, offset: (page - 1) * limit };
-}
 
 /**
  * Emit a PostGIS geography(Point) write literal.
  * Usage: .set({ currentLocation: geoPoint(lat, lng) })
+ *
+ * @param lat - Latitude.
+ * @param lng - Longitude.
+ * @returns SQL template literal for ST_SetSRID.
  */
 function geoPoint(lat: number, lng: number) {
   return sql`ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)`;
 }
 
 // =============================================================================
-// 3 — BANK ACCOUNT REPOSITORY
+// 1 — BANK ACCOUNT REPOSITORY
 // =============================================================================
 
+/**
+ * Repository for Bank Account information.
+ * Handles primary account selection, verification (penny-drop), and soft-deletion.
+ */
 export class BankAccountRepository {
+  /**
+   * Initializes the BankAccountRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
-  async findById(id: string): Promise<BankAccount | null> {
+  /**
+   * Finds a bank account by its unique UUID.
+   *
+   * @param opts - Query options.
+   * @param opts.includeDeleted - If true, include soft-deleted accounts.
+   * @returns The record if found, otherwise null.
+   */
+  async findById(
+    id: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<BankAccount | null> {
+    const conditions = [eq(bankAccountsTable.id, id)];
+    if (!opts.includeDeleted) {
+      conditions.push(isNull(bankAccountsTable.deletedAt));
+    }
+
     const [row] = await this.db
       .select()
       .from(bankAccountsTable)
-      .where(
-        and(
-          eq(bankAccountsTable.id, id),
-          isNull(bankAccountsTable.deletedAt),
-        ),
-      )
+      .where(and(...conditions))
       .limit(1);
 
     return row ?? null;
   }
 
-  async findByIdAndUser(id: string, userId: string): Promise<BankAccount | null> {
+  /**
+   * Finds a bank account by ID and user association.
+   * Matches the user_id column to ensure the caller owns the account.
+   *
+   * @param id - The UUID of the account.
+   * @param userId - The UUID of the owner.
+   * @param opts - Query options.
+   * @returns The record if found, or null.
+   */
+  async findByIdAndUser(
+    id: string,
+    userId: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<BankAccount | null> {
+    const conditions = [
+      eq(bankAccountsTable.id, id),
+      eq(bankAccountsTable.userId, userId),
+    ];
+    if (!opts.includeDeleted) {
+      conditions.push(isNull(bankAccountsTable.deletedAt));
+    }
+
     const [row] = await this.db
       .select()
       .from(bankAccountsTable)
-      .where(
-        and(
-          eq(bankAccountsTable.id, id),
-          eq(bankAccountsTable.userId, userId),
-          isNull(bankAccountsTable.deletedAt),
-        ),
-      )
+      .where(and(...conditions))
       .limit(1);
 
     return row ?? null;
   }
 
+  /**
+   * Finds the primary bank account for a given user.
+   *
+   * @param userId - The UUID of the user.
+   * @returns The primary account record, or null.
+   */
   async findPrimaryByUser(userId: string): Promise<BankAccount | null> {
     const [row] = await this.db
       .select()
@@ -160,19 +173,62 @@ export class BankAccountRepository {
     return row ?? null;
   }
 
-  async listByUser(userId: string): Promise<BankAccount[]> {
-    return this.db
+  /**
+   * Retrieves a paginated list of all non-deleted bank accounts for a user.
+   * Ordered by primary status then creation date.
+   *
+   * @param userId - The UUID of the user.
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
+  async listByUser(
+    userId: string,
+    pagination: Pagination,
+  ): Promise<{ items: BankAccount[]; total: number }> {
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseWhere = and(
+      eq(bankAccountsTable.userId, userId),
+      isNull(bankAccountsTable.deletedAt),
+    );
+
+    const where = applyCursorPagination(
+      bankAccountsTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(bankAccountsTable)
+      .where(baseWhere);
+
+    const items = await this.db
       .select()
       .from(bankAccountsTable)
-      .where(
-        and(
-          eq(bankAccountsTable.userId, userId),
-          isNull(bankAccountsTable.deletedAt),
-        ),
+      .where(where)
+      .orderBy(
+        desc(bankAccountsTable.isPrimary),
+        pagination.order === "asc"
+          ? bankAccountsTable.createdAt
+          : desc(bankAccountsTable.createdAt),
       )
-      .orderBy(desc(bankAccountsTable.isPrimary), desc(bankAccountsTable.createdAt));
+      .limit(limit)
+      .offset(offset);
+
+    return { items, total: countRow?.count ?? 0 };
   }
 
+  /**
+   * Creates a new bank account record.
+   *
+   * @param data - The data to insert.
+   * @returns The created record.
+   */
   async create(data: BankAccountInsert): Promise<BankAccount> {
     const [row] = await this.db
       .insert(bankAccountsTable)
@@ -182,15 +238,22 @@ export class BankAccountRepository {
     return row;
   }
 
-  async update(id: string, data: BankAccountUpdate): Promise<BankAccount | null> {
+  /**
+   * Updates an existing bank account record.
+   *
+   * @param id - The UUID of the account.
+   * @param data - The partial data to update.
+   * @returns The updated record, or null.
+   */
+  async update(
+    id: string,
+    data: BankAccountUpdate,
+  ): Promise<BankAccount | null> {
     const [row] = await this.db
       .update(bankAccountsTable)
       .set({ ...clean(data), updatedAt: new Date() })
       .where(
-        and(
-          eq(bankAccountsTable.id, id),
-          isNull(bankAccountsTable.deletedAt),
-        ),
+        and(eq(bankAccountsTable.id, id), isNull(bankAccountsTable.deletedAt)),
       )
       .returning();
 
@@ -200,6 +263,10 @@ export class BankAccountRepository {
   /**
    * Atomically sets one account as primary and clears the flag on all others
    * for the same user. Must be called inside a transaction.
+   *
+   * @param id - The UUID of the account to make primary.
+   * @param userId - The UUID of the owner.
+   * @returns The updated account record.
    */
   async setPrimary(id: string, userId: string): Promise<BankAccount | null> {
     // Clear primary flag on all other accounts for this user
@@ -230,7 +297,17 @@ export class BankAccountRepository {
     return row ?? null;
   }
 
-  async markVerified(id: string, pennyDropRef: string): Promise<BankAccount | null> {
+  /**
+   * Marks an account as verified following a successful penny-drop check.
+   *
+   * @param id - The UUID of the account.
+   * @param pennyDropRef - The reference ID from the payment provider.
+   * @returns The updated record.
+   */
+  async markVerified(
+    id: string,
+    pennyDropRef: string,
+  ): Promise<BankAccount | null> {
     const [row] = await this.db
       .update(bankAccountsTable)
       .set({
@@ -240,10 +317,7 @@ export class BankAccountRepository {
         updatedAt: new Date(),
       })
       .where(
-        and(
-          eq(bankAccountsTable.id, id),
-          isNull(bankAccountsTable.deletedAt),
-        ),
+        and(eq(bankAccountsTable.id, id), isNull(bankAccountsTable.deletedAt)),
       )
       .returning();
 
@@ -251,8 +325,13 @@ export class BankAccountRepository {
   }
 
   /**
-   * Soft-delete. Hard-delete is intentionally omitted — accounts must be
-   * preserved for settled payout audit trails.
+   * Performs a soft-delete on a bank account.
+   * Hard-delete is intentionally omitted — accounts must be preserved for
+   * settled payout audit trails and dispute resolution.
+   *
+   * @param id - The UUID of the account.
+   * @param userId - The UUID of the owner (to ensure ownership).
+   * @returns The updated record.
    */
   async softDelete(id: string, userId: string): Promise<BankAccount | null> {
     const [row] = await this.db
@@ -272,12 +351,27 @@ export class BankAccountRepository {
 }
 
 // =============================================================================
-// 4 — KYC DOCUMENT REPOSITORY
+// 2 — KYC DOCUMENT REPOSITORY
 // =============================================================================
 
+/**
+ * Repository for KYC (Know Your Customer) documents.
+ * Handles immutable submission logs, third-party verification (IDfy/Karza),
+ * and admin review workflows.
+ */
 export class KycDocumentRepository {
+  /**
+   * Initializes the KycDocumentRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a document record by its unique UUID.
+   *
+   * @param id - The UUID of the record.
+   * @returns The record if found, or null.
+   */
   async findById(id: string): Promise<KycDocument | null> {
     const [row] = await this.db
       .select()
@@ -288,15 +382,22 @@ export class KycDocumentRepository {
     return row ?? null;
   }
 
-  async findByIdAndUser(id: string, userId: string): Promise<KycDocument | null> {
+  /**
+   * Finds a document by ID and user, ensuring authorization.
+   *
+   * @param id - The UUID of the document.
+   * @param userId - The UUID of the user.
+   * @returns The record if found, or null.
+   */
+  async findByIdAndUser(
+    id: string,
+    userId: string,
+  ): Promise<KycDocument | null> {
     const [row] = await this.db
       .select()
       .from(kycDocumentsTable)
       .where(
-        and(
-          eq(kycDocumentsTable.id, id),
-          eq(kycDocumentsTable.userId, userId),
-        ),
+        and(eq(kycDocumentsTable.id, id), eq(kycDocumentsTable.userId, userId)),
       )
       .limit(1);
 
@@ -307,6 +408,10 @@ export class KycDocumentRepository {
    * Returns the single active submission for a given document type per user.
    * "Active" means not rejected and not expired, matching the unique index
    * constraint on the model.
+   *
+   * @param userId - The UUID of the user.
+   * @param documentType - The type (aadhaar, pan, etc.).
+   * @returns The active record if found, or null.
    */
   async findActiveByUserAndType(
     userId: string,
@@ -328,44 +433,44 @@ export class KycDocumentRepository {
     return row ?? null;
   }
 
+  /**
+   * Retrieves a paginated list of all KYC documents submitted by a user.
+   *
+   * @param userId - The UUID of the user.
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
   async listByUser(
     userId: string,
     pagination: Pagination,
   ): Promise<{ items: KycDocument[]; total: number }> {
-    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseWhere = eq(kycDocumentsTable.userId, userId);
+    const where = applyCursorPagination(
+      kycDocumentsTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
 
     const [countRow] = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(kycDocumentsTable)
-      .where(eq(kycDocumentsTable.userId, userId));
+      .where(baseWhere);
 
     const items = await this.db
       .select()
       .from(kycDocumentsTable)
-      .where(eq(kycDocumentsTable.userId, userId))
-      .orderBy(desc(kycDocumentsTable.createdAt))
-      .limit(limit)
-      .offset(offset);
-
-    return { items, total: countRow?.count ?? 0 };
-  }
-
-  async listByStatus(
-    status: KycDocument["status"],
-    pagination: Pagination,
-  ): Promise<{ items: KycDocument[]; total: number }> {
-    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
-
-    const [countRow] = await this.db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(kycDocumentsTable)
-      .where(eq(kycDocumentsTable.status, status));
-
-    const items = await this.db
-      .select()
-      .from(kycDocumentsTable)
-      .where(eq(kycDocumentsTable.status, status))
-      .orderBy(desc(kycDocumentsTable.createdAt))
+      .where(where)
+      .orderBy(
+        pagination.order === "asc"
+          ? kycDocumentsTable.createdAt
+          : desc(kycDocumentsTable.createdAt),
+      )
       .limit(limit)
       .offset(offset);
 
@@ -373,9 +478,58 @@ export class KycDocumentRepository {
   }
 
   /**
+   * Retrieves a paginated list of KYC documents filtered by status.
+   * Used primarily by admins for verification queues.
+   *
+   * @param status - The target status (pending, verified, etc.).
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
+  async listByStatus(
+    status: KycDocument["status"],
+    pagination: Pagination,
+  ): Promise<{ items: KycDocument[]; total: number }> {
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseWhere = eq(kycDocumentsTable.status, status);
+    const where = applyCursorPagination(
+      kycDocumentsTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(kycDocumentsTable)
+      .where(baseWhere);
+
+    const items = await this.db
+      .select()
+      .from(kycDocumentsTable)
+      .where(where)
+      .orderBy(
+        pagination.order === "asc"
+          ? kycDocumentsTable.createdAt
+          : desc(kycDocumentsTable.createdAt),
+      )
+      .limit(limit)
+      .offset(offset);
+
+    return { items, total: countRow?.count ?? 0 };
+  }
+
+  /**
+   * Creates a new KYC document submission.
    * Rows are immutable once submitted — new submissions always insert a fresh
    * row. The unique partial index on (userId, documentType) WHERE status NOT IN
    * ('rejected','expired') prevents duplicate active submissions at the DB level.
+   *
+   * @param data - The data to insert.
+   * @returns The created record.
    */
   async create(data: KycDocumentInsert): Promise<KycDocument> {
     const [row] = await this.db
@@ -390,6 +544,12 @@ export class KycDocumentRepository {
    * Admin review — transitions status to verified | rejected | under_review.
    * reviewedBy and reviewedAt are set here; rejectionReason is required when
    * status = 'rejected' (enforced by the DB check constraint and schema layer).
+   *
+   * @param id - The UUID of the document.
+   * @param reviewedBy - The UUID of the admin.
+   * @param status - The terminal status.
+   * @param rejectionReason - Required if status is rejected.
+   * @returns The updated record, or null.
    */
   async review(
     id: string,
@@ -416,6 +576,9 @@ export class KycDocumentRepository {
   /**
    * Marks all active documents of a given type for a user as expired.
    * Called by a background job when a document's expiresAt is reached.
+   *
+   * @param userId - The UUID of the user.
+   * @param documentType - The type of document.
    */
   async expireByUserAndType(
     userId: string,
@@ -438,6 +601,12 @@ export class KycDocumentRepository {
   /**
    * Persists the raw eKYC provider response after verification completes.
    * Called by the eKYC webhook handler.
+   *
+   * @param id - The UUID of the document.
+   * @param provider - e.g., 'Karza', 'IDfy'.
+   * @param ref - Provider reference transition ID.
+   * @param response - Raw JSON payload.
+   * @returns The updated record.
    */
   async setVerificationResponse(
     id: string,
@@ -461,27 +630,44 @@ export class KycDocumentRepository {
 }
 
 // =============================================================================
-// 5 — ADDRESS REPOSITORY
+// 3 — ADDRESS REPOSITORY
 // =============================================================================
 
+/**
+ * Repository for Physical Addresses.
+ * Handles geocoding-derived PostGIS location points, H3 indexing,
+ * and proximity-based nearby searches.
+ */
 export class AddressRepository {
+  /**
+   * Initializes the AddressRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds an address by its unique UUID.
+   *
+   * @param id - The UUID of the address.
+   * @returns The record if found, or null.
+   */
   async findById(id: string): Promise<Address | null> {
     const [row] = await this.db
       .select()
       .from(addressesTable)
-      .where(
-        and(
-          eq(addressesTable.id, id),
-          isNull(addressesTable.deletedAt),
-        ),
-      )
+      .where(and(eq(addressesTable.id, id), isNull(addressesTable.deletedAt)))
       .limit(1);
 
     return row ?? null;
   }
 
+  /**
+   * Finds an address by ID and user, ensuring authorization.
+   *
+   * @param id - The UUID of the address.
+   * @param userId - The UUID of the owner.
+   * @returns The record if found, or null.
+   */
   async findByIdAndUser(id: string, userId: string): Promise<Address | null> {
     const [row] = await this.db
       .select()
@@ -498,6 +684,12 @@ export class AddressRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds the user's default personal address.
+   *
+   * @param userId - The UUID of the user.
+   * @returns The default record, or null.
+   */
   async findDefaultByUser(userId: string): Promise<Address | null> {
     const [row] = await this.db
       .select()
@@ -514,38 +706,79 @@ export class AddressRepository {
     return row ?? null;
   }
 
-  async listByUser(userId: string): Promise<Address[]> {
-    return this.db
+  /**
+   * Retrieves a paginated list of all active addresses for a user.
+   *
+   * @param userId - The UUID of the user.
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
+  async listByUser(
+    userId: string,
+    pagination: Pagination,
+  ): Promise<{ items: Address[]; total: number }> {
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseWhere = and(
+      eq(addressesTable.userId, userId),
+      isNull(addressesTable.deletedAt),
+    );
+
+    const where = applyCursorPagination(
+      addressesTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(addressesTable)
+      .where(baseWhere);
+
+    const items = await this.db
       .select()
       .from(addressesTable)
-      .where(
-        and(
-          eq(addressesTable.userId, userId),
-          isNull(addressesTable.deletedAt),
-        ),
+      .where(where)
+      .orderBy(
+        desc(addressesTable.isDefault),
+        pagination.order === "asc"
+          ? addressesTable.createdAt
+          : desc(addressesTable.createdAt),
       )
-      .orderBy(desc(addressesTable.isDefault), desc(addressesTable.createdAt));
+      .limit(limit)
+      .offset(offset);
+
+    return { items, total: countRow?.count ?? 0 };
   }
 
+  /**
+   * Creates a new address record.
+   *
+   * @param data - The address data to insert.
+   * @returns The created record.
+   */
   async create(data: AddressInsert): Promise<Address> {
-    const [row] = await this.db
-      .insert(addressesTable)
-      .values(data)
-      .returning();
+    const [row] = await this.db.insert(addressesTable).values(data).returning();
 
     return row;
   }
 
+  /**
+   * Updates an existing address record.
+   *
+   * @param id - The UUID of the address.
+   * @param data - The partial data to update.
+   * @returns The updated record, or null.
+   */
   async update(id: string, data: AddressUpdate): Promise<Address | null> {
     const [row] = await this.db
       .update(addressesTable)
       .set({ ...clean(data), updatedAt: new Date() })
-      .where(
-        and(
-          eq(addressesTable.id, id),
-          isNull(addressesTable.deletedAt),
-        ),
-      )
+      .where(and(eq(addressesTable.id, id), isNull(addressesTable.deletedAt)))
       .returning();
 
     return row ?? null;
@@ -554,6 +787,10 @@ export class AddressRepository {
   /**
    * Sets one address as default and clears the flag on all others for the user
    * within the same scope (personal vs shop). Must be called inside a transaction.
+   *
+   * @param id - The UUID of the address to make default.
+   * @param userId - The UUID of the owner.
+   * @returns The updated record, or null.
    */
   async setDefault(id: string, userId: string): Promise<Address | null> {
     // Fetch the target to determine scope
@@ -597,6 +834,13 @@ export class AddressRepository {
    * Persists the geocoded GPS point and pre-computed H3 indexes.
    * Called asynchronously after address creation.
    * Also resolves isServiceable based on the result of a pincode/boundary lookup.
+   *
+   * @param id - The UUID of the address.
+   * @param lat - Latitude.
+   * @param lng - Longitude.
+   * @param isServiceable - Serviceability verdict.
+   * @param h3 - Res-7 and Res-9 H3 index strings.
+   * @returns The updated record.
    */
   async setLocation(
     id: string,
@@ -614,14 +858,19 @@ export class AddressRepository {
         isServiceable,
         updatedAt: new Date(),
       })
-      .where(
-        and(eq(addressesTable.id, id), isNull(addressesTable.deletedAt)),
-      )
+      .where(and(eq(addressesTable.id, id), isNull(addressesTable.deletedAt)))
       .returning();
 
     return row ?? null;
   }
 
+  /**
+   * Performs a soft-delete on an address.
+   *
+   * @param id - The UUID of the address.
+   * @param userId - The UUID of the owner.
+   * @returns The updated record.
+   */
   async softDelete(id: string, userId: string): Promise<Address | null> {
     const [row] = await this.db
       .update(addressesTable)
@@ -643,14 +892,27 @@ export class AddressRepository {
    * Uses a hybrid approach:
    *   1. H3 k-ring for fast coarse filter via B-tree IN(...)
    *   2. PostGIS ST_DWithin for exact distance ranking
+   *
+   * @param lat - Search Origin Latitude.
+   * @param lng - Search Origin Longitude.
+   * @param radiusMetres - Scan radius.
+   * @param pagination - Pagination parameters.
+   * @param h3Cells - Optional list of H3 cells for course filtering.
+   * @returns Items and total count.
    */
   async listNearby(
     lat: number,
     lng: number,
     radiusMetres: number,
+    pagination: Pagination,
     h3Cells?: string[],
-  ): Promise<Address[]> {
-    const conditions = [
+  ): Promise<{ items: Address[]; total: number }> {
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseConditions = [
       isNull(addressesTable.deletedAt),
       isNotNull(addressesTable.location),
       sql`ST_DWithin(
@@ -660,27 +922,61 @@ export class AddressRepository {
       )`,
     ];
 
-    // If H3 cells provided, add coarse filter for index-assisted scan
     if (h3Cells && h3Cells.length > 0) {
-      conditions.push(
-        inArray(addressesTable.h3IndexRes9, h3Cells),
-      );
+      baseConditions.push(inArray(addressesTable.h3IndexRes9, h3Cells));
     }
 
-    return this.db
+    const baseWhere = and(...baseConditions);
+    const where = applyCursorPagination(
+      addressesTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(addressesTable)
+      .where(baseWhere);
+
+    const items = await this.db
       .select()
       .from(addressesTable)
-      .where(and(...conditions));
+      .where(where)
+      .orderBy(
+        sql`ST_Distance(
+          ${addressesTable.location},
+          ST_SetSRID(ST_MakePoint(${lng}, ${lat}), 4326)
+        )`,
+      )
+      .limit(limit)
+      .offset(offset);
+
+    return { items, total: countRow?.count ?? 0 };
   }
 }
 
 // =============================================================================
-// 6 — SHOP OWNER PROFILE REPOSITORY
+// 4 — SHOP OWNER PROFILE REPOSITORY
 // =============================================================================
 
+/**
+ * Repository for Shop Owner Profiles.
+ * Bridges User identity with Business/Shop metadata and denormalized KYC.
+ */
 export class ShopOwnerProfileRepository {
+  /**
+   * Initializes the ShopOwnerProfileRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a shop owner profile by its unique internal UUID.
+   *
+   * @param id - The UUID of the profile.
+   * @returns The record if found, or null.
+   */
   async findById(id: string): Promise<ShopOwnerProfile | null> {
     const [row] = await this.db
       .select()
@@ -691,6 +987,13 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a shop owner profile by the associated User ID.
+   * Fundamental lookup for the authenticated session owner.
+   *
+   * @param userId - The UUID of the User.
+   * @returns The record if found, or null.
+   */
   async findByUserId(userId: string): Promise<ShopOwnerProfile | null> {
     const [row] = await this.db
       .select()
@@ -701,22 +1004,44 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Retrieves a paginated list of profiles filtered by KYC status.
+   *
+   * @param status - The target KYC status.
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
   async listByKycStatus(
     status: ShopOwnerProfile["kycStatus"],
     pagination: Pagination,
   ): Promise<{ items: ShopOwnerProfile[]; total: number }> {
-    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseWhere = eq(shopOwnerProfileTable.kycStatus, status);
+    const where = applyCursorPagination(
+      shopOwnerProfileTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
 
     const [countRow] = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(shopOwnerProfileTable)
-      .where(eq(shopOwnerProfileTable.kycStatus, status));
+      .where(baseWhere);
 
     const items = await this.db
       .select()
       .from(shopOwnerProfileTable)
-      .where(eq(shopOwnerProfileTable.kycStatus, status))
-      .orderBy(desc(shopOwnerProfileTable.createdAt))
+      .where(where)
+      .orderBy(
+        pagination.order === "asc"
+          ? shopOwnerProfileTable.createdAt
+          : desc(shopOwnerProfileTable.createdAt),
+      )
       .limit(limit)
       .offset(offset);
 
@@ -724,13 +1049,14 @@ export class ShopOwnerProfileRepository {
   }
 
   /**
-   * onConflictDoNothing: the unique constraint on userId means a second insert
-   * for the same user returns null. Callers should treat null as "already exists"
-   * and fetch the existing row if needed.
+   * Creates a new shop owner profile record.
+   * uses onConflictDoNothing: the unique constraint on userId means a second insert
+   * for the same user returns null.
+   *
+   * @param data - The data to insert.
+   * @returns The created record, or null if it already exists.
    */
-  async create(
-    data: ShopOwnerProfileInsert,
-  ): Promise<ShopOwnerProfile | null> {
+  async create(data: ShopOwnerProfileInsert): Promise<ShopOwnerProfile | null> {
     const [row] = await this.db
       .insert(shopOwnerProfileTable)
       .values(data)
@@ -740,6 +1066,13 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates an existing shop owner profile.
+   *
+   * @param userId - The UUID of the User.
+   * @param data - The partial data to update.
+   * @returns The updated record, or null.
+   */
   async update(
     userId: string,
     data: ShopOwnerProfileUpdate,
@@ -756,6 +1089,10 @@ export class ShopOwnerProfileRepository {
   /**
    * Called by the background job that aggregates kyc_documents statuses.
    * Denormalises the overall KYC verdict onto the profile row.
+   *
+   * @param userId - The UUID of the User.
+   * @param status - The new aggregate KYC status.
+   * @returns The updated record, or null.
    */
   async updateKycStatus(
     userId: string,
@@ -774,6 +1111,12 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Toggles the top-level isVerified flag for a shop owner.
+   *
+   * @param userId - The UUID of the User.
+   * @returns The updated record, or null.
+   */
   async markVerified(userId: string): Promise<ShopOwnerProfile | null> {
     const [row] = await this.db
       .update(shopOwnerProfileTable)
@@ -784,6 +1127,13 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Suspends a shop owner account with a specified reason.
+   *
+   * @param userId - The UUID of the User.
+   * @param reason - Detailed reason for suspension.
+   * @returns The updated record, or null.
+   */
   async suspend(
     userId: string,
     reason: string,
@@ -802,6 +1152,12 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Unsuspends a shop owner account.
+   *
+   * @param userId - The UUID of the User.
+   * @returns The updated record, or null.
+   */
   async unsuspend(userId: string): Promise<ShopOwnerProfile | null> {
     const [row] = await this.db
       .update(shopOwnerProfileTable)
@@ -817,6 +1173,13 @@ export class ShopOwnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates the primary bank account associated with the shop owner.
+   *
+   * @param userId - The UUID of the User.
+   * @param bankAccountId - The UUID of the BankAccount record.
+   * @returns The updated record.
+   */
   async setPrimaryBankAccount(
     userId: string,
     bankAccountId: string | null,
@@ -832,12 +1195,26 @@ export class ShopOwnerProfileRepository {
 }
 
 // =============================================================================
-// 7 — DELIVERY PARTNER PROFILE REPOSITORY
+// 5 — DELIVERY PARTNER PROFILE REPOSITORY
 // =============================================================================
 
+/**
+ * Repository for Delivery Partner Profiles.
+ * Manages vehicle details, license verification, ratings, and earnings.
+ */
 export class DeliveryPartnerProfileRepository {
+  /**
+   * Initializes the DeliveryPartnerProfileRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a delivery partner profile by its unique internal UUID.
+   *
+   * @param id - The UUID of the profile.
+   * @returns The record if found, or null.
+   */
   async findById(id: string): Promise<DeliveryPartnerProfile | null> {
     const [row] = await this.db
       .select()
@@ -848,6 +1225,12 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a delivery partner profile by the associated User ID.
+   *
+   * @param userId - The UUID of the User.
+   * @returns The record if found, or null.
+   */
   async findByUserId(userId: string): Promise<DeliveryPartnerProfile | null> {
     const [row] = await this.db
       .select()
@@ -858,6 +1241,12 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a delivery partner by their unique license number.
+   *
+   * @param licenseNumber - The RTO license number string.
+   * @returns The record if found, or null.
+   */
   async findByLicenseNumber(
     licenseNumber: string,
   ): Promise<DeliveryPartnerProfile | null> {
@@ -875,22 +1264,39 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
-
+  /**
+   * Retrieves a paginated list of delivery partners filtered by KYC status.
+   *
+   * @param status - The target KYC status.
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
   async listByKycStatus(
     status: DeliveryPartnerProfile["kycStatus"],
     pagination: Pagination,
   ): Promise<{ items: DeliveryPartnerProfile[]; total: number }> {
-    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
+
+    const baseWhere = eq(deliveryPartnerProfileTable.kycStatus, status);
+    const where = applyCursorPagination(
+      deliveryPartnerProfileTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
 
     const [countRow] = await this.db
       .select({ count: sql<number>`count(*)::int` })
       .from(deliveryPartnerProfileTable)
-      .where(eq(deliveryPartnerProfileTable.kycStatus, status));
+      .where(baseWhere);
 
     const items = await this.db
       .select()
       .from(deliveryPartnerProfileTable)
-      .where(eq(deliveryPartnerProfileTable.kycStatus, status))
+      .where(where)
       .orderBy(desc(deliveryPartnerProfileTable.createdAt))
       .limit(limit)
       .offset(offset);
@@ -898,10 +1304,13 @@ export class DeliveryPartnerProfileRepository {
     return { items, total: countRow?.count ?? 0 };
   }
 
-
   /**
-   * onConflictDoNothing: unique constraint on userId — returns null if the
+   * Creates a new delivery partner profile.
+   * uses onConflictDoNothing: unique constraint on userId — returns null if the
    * profile already exists.
+   *
+   * @param data - The data to insert.
+   * @returns The created record, or null.
    */
   async create(
     data: DeliveryPartnerProfileInsert,
@@ -918,6 +1327,13 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates an existing delivery partner profile.
+   *
+   * @param userId - The UUID of the User.
+   * @param data - The partial data to update.
+   * @returns The updated record, or null.
+   */
   async update(
     userId: string,
     data: DeliveryPartnerProfileUpdate,
@@ -931,7 +1347,14 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
-
+  /**
+   * Called by the background job that aggregates kyc_documents statuses.
+   * Denormalises the overall KYC verdict onto the profile row.
+   *
+   * @param userId - The UUID of the User.
+   * @param status - The new aggregate KYC status.
+   * @returns The updated record, or null.
+   */
   async updateKycStatus(
     userId: string,
     status: DeliveryPartnerProfile["kycStatus"],
@@ -953,6 +1376,10 @@ export class DeliveryPartnerProfileRepository {
    * Atomically appends a new rating — no read-modify-write.
    * Average is computed from ratingSum / ratingCount on read.
    * rating must be 1–5; enforced by the service layer.
+   *
+   * @param userId - The UUID of the User.
+   * @param rating - Numeric rating (1-5).
+   * @returns The updated record, or null.
    */
   async appendRating(
     userId: string,
@@ -974,6 +1401,10 @@ export class DeliveryPartnerProfileRepository {
   /**
    * Atomically records a completed delivery and credits earnings.
    * earningsPaise must be non-negative; enforced by the service layer.
+   *
+   * @param userId - The UUID of the User.
+   * @param earningsPaise - Amount earned in paise.
+   * @returns The updated record, or null.
    */
   async recordDelivery(
     userId: string,
@@ -993,6 +1424,13 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Suspends a delivery partner account with a reason.
+   *
+   * @param userId - The UUID of the User.
+   * @param reason - Detailed reason for suspension.
+   * @returns The updated record, or null.
+   */
   async suspend(
     userId: string,
     reason: string,
@@ -1011,9 +1449,13 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
-  async unsuspend(
-    userId: string,
-  ): Promise<DeliveryPartnerProfile | null> {
+  /**
+   * Unsuspends a delivery partner account.
+   *
+   * @param userId - The UUID of the User.
+   * @returns The updated record, or null.
+   */
+  async unsuspend(userId: string): Promise<DeliveryPartnerProfile | null> {
     const [row] = await this.db
       .update(deliveryPartnerProfileTable)
       .set({
@@ -1028,6 +1470,13 @@ export class DeliveryPartnerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates the primary bank account associated with the delivery partner.
+   *
+   * @param userId - The UUID of the User.
+   * @param bankAccountId - The UUID of the BankAccount record.
+   * @returns The updated record.
+   */
   async setPrimaryBankAccount(
     userId: string,
     bankAccountId: string | null,
@@ -1043,12 +1492,26 @@ export class DeliveryPartnerProfileRepository {
 }
 
 // =============================================================================
-// 8 — CUSTOMER PROFILE REPOSITORY
+// 6 — CUSTOMER PROFILE REPOSITORY
 // =============================================================================
 
+/**
+ * Repository for Customer Profiles.
+ * Manages loyalty points, lifetime aggregates, and preferences.
+ */
 export class CustomerProfileRepository {
+  /**
+   * Initializes the CustomerProfileRepository with a database connection.
+   * @param db - The Drizzle ORM database instance.
+   */
   constructor(private readonly db: DB) { }
 
+  /**
+   * Finds a customer profile by its unique internal UUID.
+   *
+   * @param id - The UUID of the profile.
+   * @returns The record if found, or null.
+   */
   async findById(id: string): Promise<CustomerProfile | null> {
     const [row] = await this.db
       .select()
@@ -1059,6 +1522,12 @@ export class CustomerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Finds a customer profile by the associated User ID.
+   *
+   * @param userId - The UUID of the User.
+   * @returns The record if found, or null.
+   */
   async findByUserId(userId: string): Promise<CustomerProfile | null> {
     const [row] = await this.db
       .select()
@@ -1070,11 +1539,13 @@ export class CustomerProfileRepository {
   }
 
   /**
-   * onConflictDoNothing: returns null if the profile already exists.
+   * Creates a new customer profile.
+   * uses onConflictDoNothing: returns null if the profile already exists.
+   *
+   * @param data - The data to insert.
+   * @returns The created record, or null.
    */
-  async create(
-    data: CustomerProfileInsert,
-  ): Promise<CustomerProfile | null> {
+  async create(data: CustomerProfileInsert): Promise<CustomerProfile | null> {
     const [row] = await this.db
       .insert(customerProfileTable)
       .values(data)
@@ -1084,6 +1555,13 @@ export class CustomerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Updates an existing customer profile.
+   *
+   * @param userId - The UUID of the User.
+   * @param data - The partial data to update.
+   * @returns The updated record, or null.
+   */
   async update(
     userId: string,
     data: CustomerProfileUpdate,
@@ -1101,6 +1579,10 @@ export class CustomerProfileRepository {
    * Atomically records a completed order and updates lifetime aggregates.
    * amountPaise must be non-negative; enforced by the service layer.
    * Called by the order event handler — never by a direct API route.
+   *
+   * @param userId - The UUID of the User.
+   * @param amountPaise - Order value in paise.
+   * @returns The updated record, or null.
    */
   async recordOrder(
     userId: string,
@@ -1125,6 +1607,10 @@ export class CustomerProfileRepository {
    * A negative delta is a debit — the DB check constraint (loyalty_points >= 0)
    * will reject the write if the result would go negative, so callers must
    * verify the current balance before debiting.
+   *
+   * @param userId - The UUID of the User.
+   * @param delta - Signed integer delta.
+   * @returns The updated record, or null.
    */
   async adjustLoyaltyPoints(
     userId: string,
@@ -1142,23 +1628,48 @@ export class CustomerProfileRepository {
     return row ?? null;
   }
 
+  /**
+   * Retrieves a paginated list of customers who have ordered after a certain date.
+   * Used for re-engagement campagins by marketing.
+   *
+   * @param after - Start timestamp.
+   * @param pagination - Pagination parameters.
+   * @returns Items and total count.
+   */
   async listByLastOrderAfter(
     after: Date,
     pagination: Pagination,
-  ): Promise<CustomerProfile[]> {
-    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+  ): Promise<{ items: CustomerProfile[]; total: number }> {
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
 
-    return this.db
+    const baseWhere = and(
+      isNotNull(customerProfileTable.lastOrderAt),
+      gte(customerProfileTable.lastOrderAt, after),
+    );
+
+    const where = applyCursorPagination(
+      customerProfileTable.id,
+      pagination.cursor,
+      pagination.order,
+      baseWhere,
+    );
+
+    const [countRow] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(customerProfileTable)
+      .where(baseWhere);
+
+    const items = await this.db
       .select()
       .from(customerProfileTable)
-      .where(
-        and(
-          isNotNull(customerProfileTable.lastOrderAt),
-          gte(customerProfileTable.lastOrderAt, after),
-        ),
-      )
+      .where(where)
       .orderBy(desc(customerProfileTable.lastOrderAt))
       .limit(limit)
       .offset(offset);
+
+    return { items, total: countRow?.count ?? 0 };
   }
 }

@@ -5,7 +5,12 @@ import { geographyPoint } from "../shared/types";
 import { shopsTable } from "./shop";
 import { masterProductTable } from "./catalog";
 import { ordersTable } from "./commerce";
-import { citiesTable, serviceablePincodesTable } from "./location";
+import {
+  citiesTable,
+  serviceablePincodesTable,
+  serviceableH3ZonesTable,
+} from "./location";
+
 import {
   configValueTypeEnum,
   configScopeEnum,
@@ -25,8 +30,6 @@ import {
   dpOnboardingStepEnum,
 } from "../shared/enums";
 import { userTable } from "./auth";
-
-
 
 // =============================================================================
 // PLATFORM CONFIG
@@ -117,7 +120,8 @@ export const platformConfigTable = table(
 export const platformConfigHistoryTable = table(
   "platform_config_history",
   {
-    id: t.bigint("id", { mode: "bigint" })
+    id: t
+      .bigint("id", { mode: "bigint" })
       .generatedAlwaysAsIdentity()
       .primaryKey(),
 
@@ -244,16 +248,18 @@ export const maintenanceWindowsTable = table(
       .references(() => citiesTable.id, { onDelete: "set null" }),
     // null = platform-wide
 
-    scheduledStart: t.timestamp("scheduled_start", {
-      withTimezone: true,
-    }).notNull(),
-    scheduledEnd: t.timestamp("scheduled_end", { withTimezone: true }).notNull(),
+    scheduledStart: t
+      .timestamp("scheduled_start", {
+        withTimezone: true,
+      })
+      .notNull(),
+    scheduledEnd: t
+      .timestamp("scheduled_end", { withTimezone: true })
+      .notNull(),
     actualStart: t.timestamp("actual_start", { withTimezone: true }),
     actualEnd: t.timestamp("actual_end", { withTimezone: true }),
 
-    status: maintenanceStatusEnum("status")
-      .notNull()
-      .default("scheduled"),
+    status: maintenanceStatusEnum("status").notNull().default("scheduled"),
 
     // Message shown to users during the window
     customerMessage: t.text("customer_message"),
@@ -295,7 +301,8 @@ export const maintenanceWindowsTable = table(
 export const platformSearchLogTable = table(
   "platform_search_log",
   {
-    id: t.bigint("id", { mode: "bigint" })
+    id: t
+      .bigint("id", { mode: "bigint" })
       .generatedAlwaysAsIdentity()
       .primaryKey(),
 
@@ -325,7 +332,10 @@ export const platformSearchLogTable = table(
 
     // Results returned
     shopResultsCount: t.integer("shop_results_count").default(0).notNull(),
-    productResultsCount: t.integer("product_results_count").default(0).notNull(),
+    productResultsCount: t
+      .integer("product_results_count")
+      .default(0)
+      .notNull(),
     hasResults: t.boolean("has_results").notNull(),
 
     // Applied filters
@@ -378,9 +388,7 @@ export const platformSearchLogTable = table(
       .index("platform_search_log_no_results_idx")
       .on(tbl.cityId, tbl.normalizedTerm)
       .where(sql`has_results = false`),
-    t
-      .index("platform_search_log_intent_idx")
-      .on(tbl.intent, tbl.searchedAt),
+    t.index("platform_search_log_intent_idx").on(tbl.intent, tbl.searchedAt),
   ],
 );
 
@@ -402,7 +410,10 @@ export const platformSearchAnalyticsTable = table(
     // Volume
     totalSearches: t.integer("total_searches").default(0).notNull(),
     uniqueSearchers: t.integer("unique_searchers").default(0).notNull(),
-    searchesWithResults: t.integer("searches_with_results").default(0).notNull(),
+    searchesWithResults: t
+      .integer("searches_with_results")
+      .default(0)
+      .notNull(),
     searchesWithoutResults: t
       .integer("searches_without_results")
       .default(0)
@@ -428,14 +439,14 @@ export const platformSearchAnalyticsTable = table(
     }),
 
     // Top queries with no results (JSON snapshot — top 20)
-    topZeroResultQueries: t.jsonb("top_zero_result_queries").$type<
-      { term: string; count: number }[]
-    >(),
+    topZeroResultQueries: t
+      .jsonb("top_zero_result_queries")
+      .$type<{ term: string; count: number }[]>(),
 
     // Top searched terms (JSON snapshot — top 20)
-    topSearchTerms: t.jsonb("top_search_terms").$type<
-      { term: string; count: number; conversionRate: number }[]
-    >(),
+    topSearchTerms: t
+      .jsonb("top_search_terms")
+      .$type<{ term: string; count: number; conversionRate: number }[]>(),
 
     calculatedAt: t
       .timestamp("calculated_at", { withTimezone: true })
@@ -460,13 +471,8 @@ export const nearbyShopCacheTable = table(
   {
     id: t.uuid("id").defaultRandom().primaryKey(),
 
-    serviceablePincodeId: t
-      .uuid("serviceable_pincode_id")
-      .notNull()
-      .references(() => serviceablePincodesTable.id, { onDelete: "cascade" }),
-
-    pincode: t.varchar("pincode", { length: 10 }).notNull(),
-    // Denormalised for fast lookup
+    // H3 res-9 cell containing the user
+    h3Index: t.varchar("h3_index", { length: 15 }).notNull(),
 
     cityId: t
       .uuid("city_id")
@@ -484,7 +490,7 @@ export const nearbyShopCacheTable = table(
           shopTypeSlug: string;
           logoKey: string | null;
           distanceMetres: number;
-          ratingAvg: number;      // ratingSum / ratingCount
+          ratingAvg: number; // ratingSum / ratingCount
           isOpen: boolean;
           deliveryLeadTimeMins: number | null;
         }[]
@@ -494,14 +500,10 @@ export const nearbyShopCacheTable = table(
     totalShopsCount: t.integer("total_shops_count").notNull(),
 
     // When this cache was last rebuilt
-    generatedAt: t
-      .timestamp("generated_at", { withTimezone: true })
-      .notNull(),
+    generatedAt: t.timestamp("generated_at", { withTimezone: true }).notNull(),
 
     // Cache is stale after this time — background job will regenerate
-    expiresAt: t
-      .timestamp("expires_at", { withTimezone: true })
-      .notNull(),
+    expiresAt: t.timestamp("expires_at", { withTimezone: true }).notNull(),
 
     createdAt: t
       .timestamp("created_at", { withTimezone: true })
@@ -513,10 +515,8 @@ export const nearbyShopCacheTable = table(
       .notNull(),
   },
   (tbl) => [
-    // One cache entry per pincode
-    t
-      .uniqueIndex("nearby_shop_cache_pincode_uq_idx")
-      .on(tbl.serviceablePincodeId),
+    // One cache entry per H3 res-9 cell
+    t.uniqueIndex("nearby_shop_cache_h3_uq_idx").on(tbl.h3Index),
 
     t.index("nearby_shop_cache_city_idx").on(tbl.cityId),
     t
@@ -581,10 +581,7 @@ export const shopOnboardingChecklistTable = table(
       .on(tbl.step, tbl.status)
       .where(sql`status NOT IN ('completed', 'skipped')`),
 
-    t.check(
-      "shop_onboarding_checklist_retry_chk",
-      sql`${tbl.retryCount} >= 0`,
-    ),
+    t.check("shop_onboarding_checklist_retry_chk", sql`${tbl.retryCount} >= 0`),
   ],
 );
 
@@ -616,17 +613,15 @@ export const shopVerificationQueueTable = table(
     priority: t.smallint("priority").default(0).notNull(),
 
     // Checklist items the reviewer must confirm
-    reviewChecklist: t
-      .jsonb("review_checklist")
-      .$type<
-        {
-          item: string;         // e.g. "GST certificate matches business name"
-          isChecked: boolean;
-          checkedBy?: string;   // adminId
-          checkedAt?: string;   // ISO timestamp
-          note?: string;
-        }[]
-      >(),
+    reviewChecklist: t.jsonb("review_checklist").$type<
+      {
+        item: string; // e.g. "GST certificate matches business name"
+        isChecked: boolean;
+        checkedBy?: string; // adminId
+        checkedAt?: string; // ISO timestamp
+        note?: string;
+      }[]
+    >(),
 
     // Reviewer's overall notes
     reviewerNotes: t.text("reviewer_notes"),
@@ -637,9 +632,7 @@ export const shopVerificationQueueTable = table(
     // Rejection reason (if status = rejected)
     rejectionReason: t.varchar("rejection_reason", { length: 500 }),
 
-    submittedAt: t
-      .timestamp("submitted_at", { withTimezone: true })
-      .notNull(),
+    submittedAt: t.timestamp("submitted_at", { withTimezone: true }).notNull(),
     reviewStartedAt: t.timestamp("review_started_at", { withTimezone: true }),
     reviewCompletedAt: t.timestamp("review_completed_at", {
       withTimezone: true,
@@ -663,9 +656,7 @@ export const shopVerificationQueueTable = table(
     t
       .uniqueIndex("shop_verification_queue_shop_active_uq_idx")
       .on(tbl.shopId)
-      .where(
-        sql`status NOT IN ('approved', 'rejected')`,
-      ),
+      .where(sql`status NOT IN ('approved', 'rejected')`),
 
     t
       .index("shop_verification_queue_status_idx")
@@ -687,7 +678,8 @@ export const shopVerificationQueueTable = table(
 export const shopVerificationHistoryTable = table(
   "shop_verification_history",
   {
-    id: t.bigint("id", { mode: "bigint" })
+    id: t
+      .bigint("id", { mode: "bigint" })
       .generatedAlwaysAsIdentity()
       .primaryKey(),
 
@@ -751,10 +743,12 @@ export const supportCategoriesTable = table(
       .default("medium"),
 
     // SLA in hours for first response and resolution
-    firstResponseSlaHours: t.smallint("first_response_sla_hours")
+    firstResponseSlaHours: t
+      .smallint("first_response_sla_hours")
       .default(4)
       .notNull(),
-    resolutionSlaHours: t.smallint("resolution_sla_hours")
+    resolutionSlaHours: t
+      .smallint("resolution_sla_hours")
       .default(48)
       .notNull(),
 
@@ -895,10 +889,7 @@ export const supportTicketsTable = table(
       "support_tickets_csat_chk",
       sql`${tbl.csatScore} IS NULL OR (${tbl.csatScore} >= 1 AND ${tbl.csatScore} <= 5)`,
     ),
-    t.check(
-      "support_tickets_reopen_chk",
-      sql`${tbl.reopenCount} >= 0`,
-    ),
+    t.check("support_tickets_reopen_chk", sql`${tbl.reopenCount} >= 0`),
   ],
 );
 
@@ -929,9 +920,11 @@ export const supportTicketMessagesTable = table(
     isInternal: t.boolean("is_internal").default(false).notNull(),
 
     // Attachments (object-store keys)
-    attachmentKeys: t.jsonb("attachment_keys").$type<
-      { key: string; filename: string; mimeType: string; sizeBytes: number }[]
-    >(),
+    attachmentKeys: t
+      .jsonb("attachment_keys")
+      .$type<
+        { key: string; filename: string; mimeType: string; sizeBytes: number }[]
+      >(),
 
     // Was this message from an automated bot / AI?
     isAutomated: t.boolean("is_automated").default(false).notNull(),
@@ -1017,9 +1010,7 @@ export const platformAnnouncementsTable = table(
     t
       .index("platform_announcements_target_idx")
       .on(tbl.target, tbl.isPublished),
-    t
-      .index("platform_announcements_city_idx")
-      .on(tbl.cityId, tbl.isPublished),
+    t.index("platform_announcements_city_idx").on(tbl.cityId, tbl.isPublished),
     t
       .index("platform_announcements_active_idx")
       .on(tbl.isPublished, tbl.expiresAt)
@@ -1063,9 +1054,7 @@ export const staticPagesTable = table(
     publishedVersion: t.integer("published_version"),
 
     // Audience
-    target: staticPageTargetEnum("target")
-      .notNull()
-      .default("all"),
+    target: staticPageTargetEnum("target").notNull().default("all"),
 
     isPublished: t.boolean("is_published").default(false).notNull(),
     publishedAt: t.timestamp("published_at", { withTimezone: true }),
@@ -1087,10 +1076,7 @@ export const staticPagesTable = table(
     t.uniqueIndex("static_pages_slug_uq_idx").on(tbl.slug),
     t.index("static_pages_published_idx").on(tbl.isPublished, tbl.target),
 
-    t.check(
-      "static_pages_version_chk",
-      sql`${tbl.version} > 0`,
-    ),
+    t.check("static_pages_version_chk", sql`${tbl.version} > 0`),
   ],
 );
 
@@ -1110,9 +1096,7 @@ export const faqsTable = table(
     answer: t.text("answer").notNull(),
 
     // Who this FAQ is for
-    target: faqTargetEnum("target")
-      .notNull()
-      .default("all"),
+    target: faqTargetEnum("target").notNull().default("all"),
 
     displayOrder: t.smallint("display_order").default(0).notNull(),
     isPublished: t.boolean("is_published").default(true).notNull(),
@@ -1138,11 +1122,9 @@ export const faqsTable = table(
       .notNull(),
   },
   (tbl) => [
-    t.index("faqs_category_target_idx").on(
-      tbl.categorySlug,
-      tbl.target,
-      tbl.isPublished,
-    ),
+    t
+      .index("faqs_category_target_idx")
+      .on(tbl.categorySlug, tbl.target, tbl.isPublished),
     t.index("faqs_featured_idx").on(tbl.isFeatured, tbl.target),
   ],
 );
@@ -1188,10 +1170,9 @@ export const dpOnboardingChecklistTable = table(
       .uniqueIndex("dp_onboarding_checklist_partner_step_uq_idx")
       .on(tbl.partnerUserId, tbl.step),
 
-    t.index("dp_onboarding_checklist_partner_idx").on(
-      tbl.partnerUserId,
-      tbl.status,
-    ),
+    t
+      .index("dp_onboarding_checklist_partner_idx")
+      .on(tbl.partnerUserId, tbl.status),
   ],
 );
 
@@ -1264,9 +1245,7 @@ export const deliveryPartnerApplicationsTable = table(
     t
       .uniqueIndex("dp_applications_applicant_active_uq_idx")
       .on(tbl.applicantUserId)
-      .where(
-        sql`status NOT IN ('approved', 'rejected')`,
-      ),
+      .where(sql`status NOT IN ('approved', 'rejected')`),
   ],
 );
 
@@ -1289,7 +1268,10 @@ export const platformHealthMetricsTable = table(
     activeShopsCount: t.integer("active_shops_count").default(0).notNull(),
     // Shops that received at least one order today
 
-    onlinePartnersCount: t.integer("online_partners_count").default(0).notNull(),
+    onlinePartnersCount: t
+      .integer("online_partners_count")
+      .default(0)
+      .notNull(),
     // Peak concurrent delivery partners online
 
     avgPartnerOnlineHours: t.decimal("avg_partner_online_hours", {
@@ -1313,7 +1295,10 @@ export const platformHealthMetricsTable = table(
     ordersPlaced: t.integer("orders_placed").default(0).notNull(),
     ordersDelivered: t.integer("orders_delivered").default(0).notNull(),
     ordersCancelled: t.integer("orders_cancelled").default(0).notNull(),
-    ordersFailedPayment: t.integer("orders_failed_payment").default(0).notNull(),
+    ordersFailedPayment: t
+      .integer("orders_failed_payment")
+      .default(0)
+      .notNull(),
 
     deliverySuccessRate: t.decimal("delivery_success_rate", {
       precision: 5,
@@ -1332,7 +1317,8 @@ export const platformHealthMetricsTable = table(
     }),
 
     // ── Platform revenue (paise) ──────────────────────────────────────────
-    gmvPaise: t.bigint("gmv_paise", { mode: "bigint" })
+    gmvPaise: t
+      .bigint("gmv_paise", { mode: "bigint" })
       .default(sql`0`)
       .notNull(),
     netPlatformRevenuePaise: t
@@ -1353,7 +1339,10 @@ export const platformHealthMetricsTable = table(
     }),
 
     // ── Search health ─────────────────────────────────────────────────────
-    platformSearchCount: t.integer("platform_search_count").default(0).notNull(),
+    platformSearchCount: t
+      .integer("platform_search_count")
+      .default(0)
+      .notNull(),
     searchNoResultRate: t.decimal("search_no_result_rate", {
       precision: 5,
       scale: 2,
