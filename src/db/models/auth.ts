@@ -58,6 +58,9 @@ export const userTable = table(
 
     metadata: t.jsonb("metadata").default(sql`'{}'::jsonb`),
 
+    digilockerLinked: t.boolean("digilocker_linked").default(false).notNull(),
+    digilockerId: t.varchar("digilocker_id", { length: 255 }),
+    
     createdAt: t
       .timestamp("created_at", { withTimezone: true })
       .defaultNow()
@@ -474,7 +477,7 @@ export const authAuditLogTable = table(
       .uuid("actor_id")
       .references(() => userTable.id, { onDelete: "set null" }),
 
-    actorRole: userRoleEnum("actor_role"),
+    actorRole: t.varchar("actor_role", { length: 100 }),
     actorIp: t.inet("actor_ip"),
     actorUserAgent: t.text("actor_user_agent"),
     requestId: t.uuid("request_id"),

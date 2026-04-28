@@ -63,42 +63,94 @@ export const authMethodEnum = pgEnum("auth_method", AUTH_METHODS);
 
 export const USER_ROLES = [
   "customer",
-  "shopkeeper",
+  "shop_owner",
   "delivery_partner",
   "admin",
-  "employe",
+  "super_admin",
+  "employee",
 ] as const;
 export const userRoleEnum = pgEnum("user_role", USER_ROLES);
 
 // =============================================================================
 // PROFILE ENUMS
 // =============================================================================
-
-export const KYC_STATUS = [
-  "not_submitted",
-  "pending",
+export const DOC_VERIFICATION_STATUS = [
   "under_review",
   "verified",
   "rejected",
-  "suspended",
-  "expired",
+  "superseded",
+  "not_submitted",
+  "expired"
 ] as const;
-export const kycStatusEnum = pgEnum("kyc_status", KYC_STATUS);
+export const docVerificationStatusEnum = pgEnum(
+  "doc_verification_status",
+  DOC_VERIFICATION_STATUS,
+);
+
+export const PROFILE_KYC_STATUS = [
+  "not_submitted",
+  "pending",
+  "verified",
+  "rejected",
+  "stale",
+] as const;
+export const profileKycStatusEnum = pgEnum(
+  "profile_kyc_status",
+  PROFILE_KYC_STATUS,
+);
+
+export const KYC_METHOD = ["digilocker", "apiProvider", "manual"] as const;
+export const kycMethodEnum = pgEnum("kyc_method", KYC_METHOD);
+
+export const KYC_REVIEW_STATUS = [
+  "done",
+  "rejected",
+  "pending"
+] as const;
+export const kycReviewStatusEnum = pgEnum(
+  "kyc_review_status",
+  KYC_REVIEW_STATUS,
+);
+
+export const MATCHING_STATUS = ["passed", "failed", "manual_review"] as const;
+export const matchingStatusEnum = pgEnum(
+  "matching_status_enum",
+  MATCHING_STATUS,
+);
+
+export const KYC_SESSION_STATUS = [
+  "pending",
+  "completed",
+  "expired",
+  "failed",
+] as const;
+export const kycSessionStatusEnum = pgEnum(
+  "kyc_session_status",
+  KYC_SESSION_STATUS,
+);
 
 export const KYC_DOCUMENT_TYPE = [
   "aadhaar",
   "pan",
-  "passport",
   "driving_license",
-  "voter_id",
   "gst_certificate",
   "business_registration",
   "bank_statement",
 ] as const;
+
 export const kycDocumentTypeEnum = pgEnum(
   "kyc_document_type",
   KYC_DOCUMENT_TYPE,
 );
+
+export const BUSINESS_TYPE = [
+  "sole_proprietorship",
+  "partnership",
+  "llp",
+  "pvt_ltd",
+  "opc",
+] as const;
+export const businessTypeEnum = pgEnum("business_type", BUSINESS_TYPE);
 
 export const VEHICLE_TYPE = [
   "bicycle",
@@ -824,14 +876,6 @@ export const searchSuggestionTypeEnum = pgEnum("search_suggestion_type", [
 export const pushSuggestionTypeEnum = pgEnum("push_suggestion_type", [
   "create_new",
   "match_existing",
-]);
-
-export const matchingStatusEnum = pgEnum("matching_status", [
-  "queued",
-  "processing",
-  "completed",
-  "failed",
-  "skipped",
 ]);
 
 export const detectionMethodEnum = pgEnum("detection_method", [

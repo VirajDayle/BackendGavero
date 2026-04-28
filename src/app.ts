@@ -45,6 +45,10 @@ import { shopPlugin } from "./modules/shop/shop.routes";
 // Catalog module
 import { catalogPlugin } from "./modules/catalog/catalog.routes";
 
+// Webhooks
+import { cashfreeRpdWebhookPlugin } from "./modules/webhooks/cashfree-rpd-webhook.routes";
+import { cashfreeDigilockerWebhookPlugin } from "./modules/webhooks/cashfree-digilocker-webhook.routes";
+
 // Config
 import { env } from "./config/env";
 import { responsePlugin } from "./middleware/response.middleware";
@@ -196,6 +200,11 @@ export const app = new Elysia()
             name: "Admin — Bank Accounts",
             description: "Admin verification of user bank accounts",
           },
+          // Webhooks
+          {
+            name: "Webhooks",
+            description: "Machine-to-machine callbacks from payment providers (Cashfree RPD, etc.)",
+          },
           // Shop module
           {
             name: "Shops",
@@ -311,6 +320,11 @@ export const app = new Elysia()
 
   // ── 13. Catalog routes ────────────────────────────────────────────────────
 
-  .use(catalogPlugin);
+  .use(catalogPlugin)
+
+  // ── 14. Webhook receivers (no JWT — machine-to-machine) ───────────────────
+
+  .use(cashfreeRpdWebhookPlugin)
+  .use(cashfreeDigilockerWebhookPlugin);
 
 export type App = typeof app;

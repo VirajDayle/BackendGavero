@@ -179,15 +179,15 @@ export const shopsTable = table(
     // Primary address — also the default pickup/return location
     primaryAddressId: t
       .uuid("primary_address_id")
-      .references(() => addressesTable.id, { onDelete: "set null" }),
+      .references(() => addressesTable.id, { onDelete: "set null" }).notNull(),
 
     // geography(Point, 4326) — shop pin for map view and proximity queries
     // GIST index → migrations/add_spatial_indexes.sql
-    location: geographyPoint("location"),
+    location: geographyPoint("location").notNull(),
 
     // Uber H3 hexagonal indexes — precomputed at write time for fast proximity lookups
-    h3IndexRes7: t.varchar("h3_index_res7", { length: 15 }),
-    h3IndexRes9: t.varchar("h3_index_res9", { length: 15 }),
+    h3IndexRes7: t.varchar("h3_index_res7", { length: 15 }).notNull(),
+    h3IndexRes9: t.varchar("h3_index_res9", { length: 15 }).notNull(),
 
     // Which city this shop services — used for city-level filtering
     cityId: t
@@ -493,7 +493,7 @@ export const shopHolidaysTable = table(
 
     holidayName: t.varchar("holiday_name", { length: 255 }),
     message: t.text("message"), // shown to customers during this period
-    
+
     // Inclusive date range — single-day holiday: start_date = end_date
     startDate: t.date("start_date").notNull(),
     endDate: t.date("end_date").notNull(),

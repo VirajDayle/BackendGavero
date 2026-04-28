@@ -13,6 +13,7 @@ import { clean, applyPagination } from "../../shared";
 import {
   shopBranchesTable,
   preCategoriesTable,
+  categoriesTable,
   shopHolidaysTable,
   shopHoursTable,
   shopsTable,
@@ -34,12 +35,15 @@ type BranchUpdate = Partial<BranchInsert>;
 type ShopType = InferSelectModel<typeof shopTypeTable>;
 type ShopTypeInsert = InferInsertModel<typeof shopTypeTable>;
 
-type ShopCategory = InferSelectModel<typeof preCategoriesTable>;
-type ShopCategoryInsert = InferInsertModel<typeof preCategoriesTable>;
+type PreCategory = InferSelectModel<typeof preCategoriesTable>;
+type PreCategoryInsert = InferInsertModel<typeof preCategoriesTable>;
+
+type Category = InferSelectModel<typeof categoriesTable>;
+type CategoryInsert = InferInsertModel<typeof categoriesTable>;
+type CategoryUpdate = Partial<CategoryInsert>;
 
 type OperatingHours = InferSelectModel<typeof shopHoursTable>;
 type OperatingHoursInsert = InferInsertModel<typeof shopHoursTable>;
-
 
 // ---------------------------------------------------------------------------
 // 1. ShopRepository
@@ -48,7 +52,10 @@ type OperatingHoursInsert = InferInsertModel<typeof shopHoursTable>;
 export class ShopRepository {
   constructor(private readonly db: DB) { }
 
-  async findById(id: string, opts: { includeDeleted?: boolean } = {}): Promise<Shop | null> {
+  async findById(
+    id: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<Shop | null> {
     const conditions = [eq(shopsTable.id, id)];
     if (!opts.includeDeleted) conditions.push(isNull(shopsTable.deletedAt));
 
@@ -61,7 +68,10 @@ export class ShopRepository {
     return row ?? null;
   }
 
-  async findBySlug(slug: string, opts: { includeDeleted?: boolean } = {}): Promise<Shop | null> {
+  async findBySlug(
+    slug: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<Shop | null> {
     const conditions = [eq(shopsTable.slug, slug)];
     if (!opts.includeDeleted) conditions.push(isNull(shopsTable.deletedAt));
 
@@ -78,13 +88,20 @@ export class ShopRepository {
     const [row] = await this.db
       .select()
       .from(shopsTable)
-      .where(and(eq(shopsTable.username, username), isNull(shopsTable.deletedAt)))
+      .where(
+        and(eq(shopsTable.username, username), isNull(shopsTable.deletedAt)),
+      )
       .limit(1);
     return row ?? null;
   }
 
-  async list(pagination: Pagination): Promise<{ items: Shop[]; total: number }> {
-    const { limit, offset } = applyPagination(pagination.limit, pagination.page);
+  async list(
+    pagination: Pagination,
+  ): Promise<{ items: Shop[]; total: number }> {
+    const { limit, offset } = applyPagination(
+      pagination.limit,
+      pagination.page,
+    );
 
     const [countRow] = await this.db
       .select({ count: sql<number>`count(*)::int` })
@@ -103,10 +120,7 @@ export class ShopRepository {
   }
 
   async create(data: ShopInsert): Promise<Shop> {
-    const [row] = await this.db
-      .insert(shopsTable)
-      .values(data)
-      .returning();
+    const [row] = await this.db.insert(shopsTable).values(data).returning();
 
     return row;
   }
@@ -158,9 +172,13 @@ export class ShopRepository {
 export class BranchRepository {
   constructor(private readonly db: DB) { }
 
-  async findById(id: string, opts: { includeDeleted?: boolean } = {}): Promise<Branch | null> {
+  async findById(
+    id: string,
+    opts: { includeDeleted?: boolean } = {},
+  ): Promise<Branch | null> {
     const conditions = [eq(shopBranchesTable.id, id)];
-    if (!opts.includeDeleted) conditions.push(isNull(shopBranchesTable.deletedAt));
+    if (!opts.includeDeleted)
+      conditions.push(isNull(shopBranchesTable.deletedAt));
 
     const [row] = await this.db
       .select()
@@ -175,7 +193,12 @@ export class BranchRepository {
     return this.db
       .select()
       .from(shopBranchesTable)
-      .where(and(eq(shopBranchesTable.shopId, shopId), isNull(shopBranchesTable.deletedAt)))
+      .where(
+        and(
+          eq(shopBranchesTable.shopId, shopId),
+          isNull(shopBranchesTable.deletedAt),
+        ),
+      )
       .orderBy(shopBranchesTable.name);
   }
 
@@ -223,7 +246,9 @@ export class BranchRepository {
     const [row] = await this.db
       .update(shopBranchesTable)
       .set(updateData)
-      .where(and(eq(shopBranchesTable.id, id), isNull(shopBranchesTable.deletedAt)))
+      .where(
+        and(eq(shopBranchesTable.id, id), isNull(shopBranchesTable.deletedAt)),
+      )
       .returning();
 
     return row ?? null;
@@ -233,7 +258,9 @@ export class BranchRepository {
     const [row] = await this.db
       .update(shopBranchesTable)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(shopBranchesTable.id, id), isNull(shopBranchesTable.deletedAt)))
+      .where(
+        and(eq(shopBranchesTable.id, id), isNull(shopBranchesTable.deletedAt)),
+      )
       .returning();
 
     return row ?? null;
@@ -259,23 +286,34 @@ export class ShopTypeRepository {
       .limit(1);
     return row ?? null;
   }
+
+  async findByName(name: string): Promise<ShopType | null> {
+    const [row] = await this.db
+      .select()
+      .from(shopTypeTable)
+      .where(eq(shopTypeTable.name, name))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async create(data: ShopTypeInsert): Promise<ShopType> {
+    const [row] = await this.db.insert(shopTypeTable).values(data).returning();
+
+    return row;
+  }
 }
 
-// ---------------------------------------------------------------------------
-// 4. CategoryRepository
-// ---------------------------------------------------------------------------
+export class PreCategoryRepository {
+  constructor(private readonly db: DB) {}
 
-export class CategoryRepository {
-  constructor(private readonly db: DB) { }
-
-  async list(): Promise<ShopCategory[]> {
+  async list(): Promise<PreCategory[]> {
     return this.db
       .select()
       .from(preCategoriesTable)
       .orderBy(preCategoriesTable.sortOrder, preCategoriesTable.name);
   }
 
-  async findById(id: string): Promise<ShopCategory | null> {
+  async findById(id: string): Promise<PreCategory | null> {
     const [row] = await this.db
       .select()
       .from(preCategoriesTable)
@@ -283,10 +321,79 @@ export class CategoryRepository {
       .limit(1);
     return row ?? null;
   }
+
+  async findByName(name: string): Promise<PreCategory | null> {
+    const [row] = await this.db
+      .select()
+      .from(preCategoriesTable)
+      .where(eq(preCategoriesTable.name, name))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async create(data: PreCategoryInsert): Promise<PreCategory> {
+    const [row] = await this.db
+      .insert(preCategoriesTable)
+      .values(data)
+      .returning();
+    return row;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// 5. HoursRepository
+// 5. CategoryRepository (Shop-owned)
+// ---------------------------------------------------------------------------
+
+export class CategoryRepository {
+  constructor(private readonly db: DB) {}
+
+  async listByShop(shopId: string): Promise<Category[]> {
+    return this.db
+      .select()
+      .from(categoriesTable)
+      .where(eq(categoriesTable.shopId, shopId))
+      .orderBy(categoriesTable.sortOrder, categoriesTable.name);
+  }
+
+  async findById(id: string): Promise<Category | null> {
+    const [row] = await this.db
+      .select()
+      .from(categoriesTable)
+      .where(eq(categoriesTable.id, id))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async findByName(shopId: string, name: string): Promise<Category | null> {
+    const [row] = await this.db
+      .select()
+      .from(categoriesTable)
+      .where(and(eq(categoriesTable.shopId, shopId), eq(categoriesTable.name, name)))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async create(data: CategoryInsert): Promise<Category> {
+    const [row] = await this.db.insert(categoriesTable).values(data).returning();
+    return row;
+  }
+
+  async update(id: string, data: CategoryUpdate): Promise<Category | null> {
+    const [row] = await this.db
+      .update(categoriesTable)
+      .set({ ...clean(data), updatedAt: new Date() })
+      .where(eq(categoriesTable.id, id))
+      .returning();
+    return row ?? null;
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.db.delete(categoriesTable).where(eq(categoriesTable.id, id));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. HoursRepository
 // ---------------------------------------------------------------------------
 
 export class HoursRepository {
@@ -300,7 +407,10 @@ export class HoursRepository {
       .orderBy(shopHoursTable.dayOfWeek);
   }
 
-  async upsert(data: OperatingHoursInsert, tx?: DB | any): Promise<OperatingHours> {
+  async upsert(
+    data: OperatingHoursInsert,
+    tx?: DB | any,
+  ): Promise<OperatingHours> {
     const db = tx ?? this.db;
     const [row] = await db
       .insert(shopHoursTable)

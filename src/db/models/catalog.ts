@@ -6,7 +6,6 @@ import { userTable } from "./auth";
 import {
   productStatusEnum,
   productConditionEnum,
-
   productSourceEnum,
   productRecommendationBadgeEnum,
   discountTypeEnum,
@@ -22,7 +21,6 @@ import {
   viewSourceEnum,
   deviceTypeEnum,
   comparisonOutcomeEnum,
-
   trendPeriodEnum,
   trendDirectionEnum,
   questionTypeEnum,
@@ -109,8 +107,6 @@ import {
 //   The rough draft referenced auth.schema / shop.schema — corrected to
 //   auth.model / shop.model to match the rest of the codebase.
 // =============================================================================
-
-
 
 // =============================================================================
 // SECTION 2 — BRANDS
@@ -453,7 +449,7 @@ export const masterProductImagesTable = table(
     t
       .index("master_product_images_product_idx")
       .on(tbl.masterProductId, tbl.isPrimary),
-    t.index("master_product_images_variant_idx").on(tbl.variantId)
+    t.index("master_product_images_variant_idx").on(tbl.variantId),
   ],
 );
 
@@ -752,7 +748,7 @@ export const shopProductPriceTable = table(
         ${tbl.discountStartDate} IS NULL OR
         ${tbl.discountEndDate} >= ${tbl.discountStartDate}
       `,
-    )
+    ),
   ],
 );
 
@@ -1237,9 +1233,7 @@ export const recommendationQueueTable = table(
     reason: t.text("reason"),
     supportingData: t.jsonb("supporting_data").$type<Record<string, unknown>>(),
 
-    status: recQueueStatusEnum("status")
-      .notNull()
-      .default("pending"),
+    status: recQueueStatusEnum("status").notNull().default("pending"),
 
     reviewedBy: t
       .uuid("reviewed_by")
@@ -1851,7 +1845,6 @@ export const productViewAggregatesTable = table(
 // ---------------------------------------------------------------------------
 // Product Interactions (quick-action events)
 // ---------------------------------------------------------------------------
-
 
 export const productInteractionsTable = table(
   "product_interactions",
@@ -2975,7 +2968,9 @@ export const catalogAiRecommendationsTable = table(
       .references(() => userTable.id, { onDelete: "set null" }),
     sessionId: t.varchar("session_id", { length: 255 }),
 
-    recommendationType: catalogueRecommendationTypeEnum("recommendation_type").notNull(),
+    recommendationType: catalogueRecommendationTypeEnum(
+      "recommendation_type",
+    ).notNull(),
     displayLocation: displayLocationEnum("display_location").notNull(),
 
     inputContext: t.jsonb("input_context").$type<{
@@ -3205,9 +3200,7 @@ export const masterProductMatchingQueueTable = table(
       .notNull()
       .references(() => shopsTable.id, { onDelete: "cascade" }),
 
-    status: matchingStatusEnum("status")
-      .default("queued")
-      .notNull(),
+    status: matchingStatusEnum("status").default("queued").notNull(),
 
     priority: t.integer("priority").default(0),
     attempts: t.integer("attempts").default(0).notNull(),
@@ -3270,9 +3263,7 @@ export const duplicateMasterProductReportsTable = table(
       .references(() => userTable.id, { onDelete: "set null" }),
     reportReason: t.text("report_reason"),
 
-    status: duplicateReportStatusEnum("status")
-      .default("pending")
-      .notNull(),
+    status: duplicateReportStatusEnum("status").default("pending").notNull(),
 
     reviewedBy: t
       .uuid("reviewed_by")

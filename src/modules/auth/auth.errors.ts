@@ -1,9 +1,9 @@
 /**
  * Centralized error factories for the Authentication module.
- * 
- * This file provides a structured, production-grade way to throw consistent 
- * application errors (AppError) across all layers (Service, Controller, Repo). 
- * Each error includes an HTTP status code, a unique machine-readable error code, 
+ *
+ * This file provides a structured, production-grade way to throw consistent
+ * application errors (AppError) across all layers (Service, Controller, Repo).
+ * Each error includes an HTTP status code, a unique machine-readable error code,
  * and localized metadata for audit logging.
  */
 
@@ -57,6 +57,11 @@ class Common {
   static rateLimited(msg = "Too many requests. Please try again later") {
     return new AppError(429, "RATE_LIMITED", msg, meta("security"));
   }
+
+  /** Thrown when an internal error occurs that should not be exposed to the client. */
+  static internalError(msg = "Internal server error") {
+    return new AppError(500, "INTERNAL_ERROR", msg, meta("internal"));
+  }
 }
 
 /**
@@ -107,6 +112,11 @@ class Auth {
   static accountBanned(msg = "Account has been banned") {
     return new AppError(403, "USER_BANNED", msg, meta("login"));
   }
+
+  /** Thrown when the user's token is stale and needs to be refreshed (soft 401). */
+  static tokenStale(msg = "Token is stale. Please refresh") {
+    return new AppError(401, "TOKEN_STALE", msg, meta("verify_token"));
+  }
 }
 
 /**
@@ -130,7 +140,12 @@ class Otp {
 
   /** Thrown when the verification bridge token (otpToken) check fails. */
   static tokenInvalid(msg = "OTP token is invalid or expired") {
-    return new AppError(401, "OTP_TOKEN_INVALID", msg, meta("verify_otp_token"));
+    return new AppError(
+      401,
+      "OTP_TOKEN_INVALID",
+      msg,
+      meta("verify_otp_token"),
+    );
   }
 
   /** Thrown when both phone and email are missing from a request. */
@@ -279,7 +294,12 @@ class Role {
 
   /** Thrown when attempting to revoke a role from a user who doesn't have it. */
   static mappingNotFound(msg = "User-role mapping not found") {
-    return new AppError(404, "ROLE_MAPPING_NOT_FOUND", msg, meta("revoke_role"));
+    return new AppError(
+      404,
+      "ROLE_MAPPING_NOT_FOUND",
+      msg,
+      meta("revoke_role"),
+    );
   }
 }
 
@@ -313,6 +333,13 @@ class Audit {
   }
 }
 
+class Kyc {
+  /** Thrown when a user's KYC is not verified for a specific role. */
+  static notVerified(msg = "KYC not verified") {
+    return new AppError(403, "KYC_NOT_VERIFIED", msg, meta("verify_kyc"));
+  }
+}
+
 // ── Namespace export ──────────────────────────────────────────────────────────
 
 export const AuthErrors = {
@@ -326,4 +353,5 @@ export const AuthErrors = {
   Device,
   Referral,
   Audit,
+  Kyc,
 } as const;

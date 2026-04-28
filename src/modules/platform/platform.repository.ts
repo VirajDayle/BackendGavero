@@ -10,14 +10,12 @@ import type { DB } from "../../db/index";
 import {
   citiesTable,
   serviceableH3ZonesTable,
-  serviceablePincodesTable,
 } from "../../db/schema";
 
 import type {
   CityInsert,
   ServiceableH3Zone,
   ServiceableH3ZoneInsert,
-  ServiceablePincode,
   ServiceablePincodeInsert,
 } from "../../db/schema";
 
@@ -33,7 +31,7 @@ export type ActiveFilter = "all" | "active" | "inactive";
 
 type CityUpdate = Partial<CityInsert>;
 type ServiceableH3ZoneUpdate = Partial<ServiceableH3ZoneInsert>;
-type ServiceablePincodeUpdate = Partial<ServiceablePincodeInsert>;
+
 
 // =============================================================================
 // Helpers

@@ -33,6 +33,14 @@ class Common {
 // ── Bank Account ──────────────────────────────────────────────────────────────
 
 class BankAccount {
+  static alreadyExists(msg = "Bank account already exist") {
+    return new AppError(
+      409,
+      "BANK_ACCOUNT_ALREADY_EXISTS",
+      msg,
+      meta("add_bank_account"),
+    );
+  }
   static notFound(msg = "Bank account not found") {
     return new AppError(
       404,
@@ -42,13 +50,19 @@ class BankAccount {
     );
   }
 
-  static invalidIfsc(msg = "Invalid IFSC Code or unable to resolve bank details") {
+  static limitExceeded(msg = "Bank account limit exceeded") {
     return new AppError(
-      400,
-      "INVALID_IFSC",
+      404,
+      "BANK_ACCOUNT_LIMIT_EXCEEDED",
       msg,
-      meta("resolve_ifsc"),
+      meta("bank_account_limit"),
     );
+  }
+
+  static invalidIfsc(
+    msg = "Invalid IFSC Code or unable to resolve bank details",
+  ) {
+    return new AppError(400, "INVALID_IFSC", msg, meta("resolve_ifsc"));
   }
 
   static ownershipMismatch(msg = "Bank account does not belong to this user") {
@@ -77,6 +91,48 @@ class BankAccount {
       "BANK_ACCOUNT_ALREADY_PRIMARY",
       msg,
       meta("set_primary"),
+    );
+  }
+
+  static verificationFailed(
+    msg = "Bank account verification failed. Please check the details and try again.",
+  ) {
+    return new AppError(
+      400,
+      "BANK_ACCOUNT_VERIFICATION_FAILED",
+      msg,
+      meta("verify_bank_account"),
+    );
+  }
+
+  static pennyDropMismatch(
+    msg = "Penny drop result does not match the bank account on file. Verification failed.",
+  ) {
+    return new AppError(
+      422,
+      "PENNY_DROP_MISMATCH",
+      msg,
+      meta("confirm_penny_drop"),
+    );
+  }
+
+  static pennyDropPending(
+    msg = "Penny drop payment is still pending. Please wait and try again.",
+  ) {
+    return new AppError(
+      202,
+      "PENNY_DROP_PENDING",
+      msg,
+      meta("confirm_penny_drop"),
+    );
+  }
+
+  static alreadyVerified(msg = "Bank account is already verified.") {
+    return new AppError(
+      409,
+      "BANK_ACCOUNT_ALREADY_VERIFIED",
+      msg,
+      meta("confirm_penny_drop"),
     );
   }
 }
@@ -113,6 +169,44 @@ class KycDocument {
       meta("review_kyc"),
     );
   }
+
+  static reviewAlreadyExists(
+    msg = "A pending KYC review already exists for this user",
+  ) {
+    return new AppError(
+      409,
+      "KYC_REVIEW_ALREADY_EXISTS",
+      msg,
+      meta("submit_kyc_review"),
+    );
+  }
+
+  static reviewNotFound(msg = "KYC review request not found") {
+    return new AppError(
+      404,
+      "KYC_REVIEW_NOT_FOUND",
+      msg,
+      meta("find_kyc_review"),
+    );
+  }
+
+  static documentTypeNotFound(msg = "KYC document not found") {
+    return new AppError(
+      404,
+      "KYC_DOCUMENT_NOT_FOUND",
+      msg,
+      meta("find_kyc_document"),
+    );
+  }
+
+  static missingDocuments(msg = "Missing KYC documents") {
+    return new AppError(
+      400,
+      "KYC_MISSING_DOCUMENTS",
+      msg,
+      meta("submit_kyc_review"),
+    );
+  }
 }
 
 // ── Address ───────────────────────────────────────────────────────────────────
@@ -139,6 +233,15 @@ class Address {
       "ADDRESS_DELETE_DEFAULT",
       msg,
       meta("delete_address"),
+    );
+  }
+
+  static notServicableAddress(msg = "Address is not serviceable") {
+    return new AppError(
+      400,
+      "ADDRESS_NOT_SERVICABLE",
+      msg,
+      meta("not_servicable"),
     );
   }
 }
@@ -172,6 +275,44 @@ class ShopOwner {
       meta("verify_shop_owner"),
     );
   }
+
+  static shopRoleNotAssign(msg = "Shop role not assigned") {
+    return new AppError(
+      401,
+      "SHOPROLE_NOT_ASSIGN",
+      msg,
+      meta("shop_role_assign"),
+    );
+  }
+
+  static notCreated(msg = "Shop role not assigned") {
+    return new AppError(
+      401,
+      "SHOPPROFILE_NOT_CREATED",
+      msg,
+      meta("shop_profile_creation"),
+    );
+  }
+
+  static bankAccountNotLink(
+    msg = "Bank account not linked with shopOwner profile",
+  ) {
+    return new AppError(
+      401,
+      "SHOPPROFILE_BANK_NOTLINKED",
+      msg,
+      meta("shop_profile_bank"),
+    );
+  }
+
+  static profilePhotoNotUpload(msg = "Profile photo not uploaded") {
+    return new AppError(
+      401,
+      "SHOPPROFILE_PROFILE_PHOTO_NOT_UPLOADED",
+      msg,
+      meta("shop_profile_profile_photo"),
+    );
+  }
 }
 
 // ── Delivery Partner ──────────────────────────────────────────────────────────
@@ -195,6 +336,15 @@ class DeliveryPartner {
     );
   }
 
+  static roleNotAssign(msg = "Delivery partner role not assign") {
+    return new AppError(
+      409,
+      "DELIVERY_PARTNER_ ROLE_NOT_ASSIGN",
+      msg,
+      meta("role_assign"),
+    );
+  }
+
   static suspended(msg = "Delivery partner account is suspended") {
     return new AppError(
       403,
@@ -204,7 +354,9 @@ class DeliveryPartner {
     );
   }
 
-  static licenseConflict(msg = "A partner with this license number already exists") {
+  static licenseConflict(
+    msg = "A partner with this license number already exists",
+  ) {
     return new AppError(
       409,
       "LICENSE_CONFLICT",
@@ -242,21 +394,11 @@ class DeliveryPartner {
 
 class Customer {
   static notFound(msg = "Customer profile not found") {
-    return new AppError(
-      404,
-      "CUSTOMER_NOT_FOUND",
-      msg,
-      meta("find_customer"),
-    );
+    return new AppError(404, "CUSTOMER_NOT_FOUND", msg, meta("find_customer"));
   }
 
   static profileExists(msg = "Customer profile already exists") {
-    return new AppError(
-      409,
-      "CUSTOMER_EXISTS",
-      msg,
-      meta("create_customer"),
-    );
+    return new AppError(409, "CUSTOMER_EXISTS", msg, meta("create_customer"));
   }
 
   static insufficientPoints(
@@ -271,6 +413,98 @@ class Customer {
   }
 }
 
+class ProfileClass {
+  static notFound(msg = "Profile not found") {
+    return new AppError(404, "PROFILE_NOT_FOUND", msg, meta("find_profile"));
+  }
+}
+
+// ── Digilocker ────────────────────────────────────────────────────────────────
+
+class Digilocker {
+  static accountNotFound(
+    msg = "No Digilocker account found for the provided details",
+  ) {
+    return new AppError(
+      404,
+      "DIGILOCKER_ACCOUNT_NOT_FOUND",
+      msg,
+      meta("verify_digilocker_account"),
+    );
+  }
+
+  static verificationFailed(msg = "Digilocker verification failed") {
+    return new AppError(
+      400,
+      "DIGILOCKER_VERIFICATION_FAILED",
+      msg,
+      meta("verify_digilocker_account"),
+    );
+  }
+
+  static urlCreationFailed(msg = "Failed to create Digilocker consent URL") {
+    return new AppError(
+      502,
+      "DIGILOCKER_URL_CREATION_FAILED",
+      msg,
+      meta("create_digilocker_url"),
+    );
+  }
+}
+
+class KycReview {
+  static notFound(msg = "Review not found") {
+    return new AppError(
+      404,
+      "KYC_REVIEW_NOT_FOUND",
+      msg,
+      meta("find_kyc_review"),
+    );
+  }
+
+  static invalidTransition(msg = "Invalid transition") {
+    return new AppError(
+      422,
+      "KYC_REVIEW_INVALID_TRANSITION",
+      msg,
+      meta("update_status"),
+    );
+  }
+
+  static alreadyApproved(msg = "Review already approved") {
+    return new AppError(
+      409,
+      "KYC_REVIEW_ALREADY_APPROVED",
+      msg,
+      meta("update_status"),
+    );
+  }
+
+  static alreadyRejected(msg = "Review already rejected") {
+    return new AppError(
+      409,
+      "KYC_REVIEW_ALREADY_REJECTED",
+      msg,
+      meta("update_status"),
+    );
+  }
+
+  static missingDocumentsAtApproval(missingDocTypeIds: string[]) {
+    return new AppError(
+      400,
+      "KYC_MISSING_DOCUMENTS_AT_APPROVAL",
+      `Cannot approve: ${missingDocTypeIds.length} required document(s) are missing or not yet verified. Use rejectReview() with a reason instead.`,
+      meta("approve_review"),
+    );
+  }
+}
+
+class KycProfile {
+  static kycNotVerified(msg = "Kyc for this specific role not exist") {
+    return new AppError(400, "KYC_NOT_VERIFIED", msg, meta("kyc_verification"));
+  }
+}
+
 // ── Namespace export ──────────────────────────────────────────────────────────
 
 export const ProfileErrors = {
@@ -281,4 +515,8 @@ export const ProfileErrors = {
   ShopOwner,
   DeliveryPartner,
   Customer,
+  Profile: ProfileClass,
+  Digilocker,
+  KycReview,
+  KycProfile,
 } as const;

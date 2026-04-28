@@ -86,7 +86,7 @@ export class UserRepository {
    * Initializes the UserRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a user by their unique UUID.
@@ -374,6 +374,19 @@ export class UserRepository {
 
     return row ?? null;
   }
+
+  async markDigilockerExist(
+    id: string,
+    digilockerId: string,
+  ): Promise<User | null> {
+    const [row] = await this.db
+      .update(userTable)
+      .set({ digilockerLinked: true, digilockerId: digilockerId })
+      .where(eq(userTable.id, id))
+      .returning();
+
+    return row ?? null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +402,7 @@ export class OtpRepository {
    * Initializes the OtpRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Atomically increments the attempt counter for an OTP record.
@@ -633,7 +646,7 @@ export class SessionRepository {
    * Initializes the SessionRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a session by its unique UUID.
@@ -850,7 +863,7 @@ export class RoleRepository {
    * Initializes the RoleRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a role by its unique UUID.
@@ -950,7 +963,7 @@ export class PermissionRepository {
    * Initializes the PermissionRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a permission by its unique UUID.
@@ -1047,7 +1060,7 @@ export class RolePermissionRepository {
    * Initializes the RolePermissionRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Lists all permissions associated with a specific role.
@@ -1108,7 +1121,7 @@ export class UserRoleRepository {
    * Initializes the UserRoleRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Lists all active roles assigned to a user.
@@ -1138,13 +1151,12 @@ export class UserRoleRepository {
    * @param userId - The UUID of the user.
    * @returns An array of objects containing the role slug.
    */
-  async findByUserId(userId: string): Promise<{ roleSlug: string }[]> {
+  async findByUserId(userId: string): Promise<{ roleId: string }[]> {
     return this.db
       .select({
-        roleSlug: rolesTable.slug,
+        roleId: userRolesTable.roleId,
       })
       .from(userRolesTable)
-      .innerJoin(rolesTable, eq(userRolesTable.roleId, rolesTable.id))
       .where(
         and(
           eq(userRolesTable.userId, userId),
@@ -1215,7 +1227,7 @@ export class AuthAttemptRepository {
    * Initializes the AuthAttemptRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Creates a new authentication attempt record.
@@ -1358,7 +1370,7 @@ export class ReferralCodeRepository {
    * Initializes the ReferralCodeRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a referral code by its string representation.
@@ -1469,7 +1481,7 @@ export class ReferralRepository {
    * Initializes the ReferralRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a referral record by the referee's user ID.
@@ -1569,7 +1581,7 @@ export class AuditLogRepository {
    * Initializes the AuditLogRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Creates a new audit log entry.
@@ -1781,7 +1793,7 @@ export class RateLimitRepository {
    * Initializes the RateLimitRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a rate limit record by key and action.
@@ -1963,7 +1975,7 @@ export class UserDeviceRepository {
    * Initializes the UserDeviceRepository with a database connection.
    * @param db - The Drizzle ORM database instance.
    */
-  constructor(private readonly db: DB) {}
+  constructor(private readonly db: DB) { }
 
   /**
    * Finds a device by user ID and fingerprint.

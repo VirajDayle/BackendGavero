@@ -79,7 +79,7 @@ export const serviceableH3ZonesTable = table(
   {
     id: t.uuid("id").defaultRandom().primaryKey(),
 
-    // H3 resolution-7 cell index — 15-char hex string e.g. "87283472fffffff"
+    // H3 index of resolutio 8
     h3Index: t.varchar("h3_index", { length: 15 }).notNull(),
 
     cityId: t

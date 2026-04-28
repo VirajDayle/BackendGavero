@@ -25,7 +25,6 @@ const schema = z
     // Redis
     REDIS_URL: z.string().default("redis://localhost:6379"),
 
-
     // JWT
     JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
     JWT_ACCESS_TTL_MIN: z.coerce.number().int().positive().default(15),
@@ -72,13 +71,32 @@ const schema = z
     RATE_LIMIT_COOLDOWN_SEC: z.coerce.number().int().positive().default(30),
 
     // Encryption (AES-256-GCM for bank account numbers, KYC document numbers, etc.)
-    ENCRYPTION_KEY: z.string().length(64, "ENCRYPTION_KEY must be a 64-char hex string (32 bytes)").optional(),
+    ENCRYPTION_KEY: z
+      .string()
+      .length(64, "ENCRYPTION_KEY must be a 64-char hex string (32 bytes)")
+      .optional(),
 
     // Mapbox API
     MAPBOX_ACCESS_TOKEN: z.string().min(1, "Mapbox Access Token is required"),
 
     // CORS
     CORS_ORIGIN: z.string().default("*"),
+
+    // Verification
+    CASHFREE_ID: z.string(),
+    CASHFREE_SECRET_TOKEN: z.string(),
+    /** HMAC secret for verifying incoming Cashfree RPD webhook signatures. */
+    CASHFREE_WEBHOOK_SECRET: z.string().optional(),
+    BANK_ACCOUNT_VERIFIER: z.enum(["cashfree", "mock"]).default("mock"),
+    PENNY_DROP_PROVIDER: z.enum(["cashfree", "razorpay", "mock"]).default("mock"),
+    PAN_VERIFIER: z.enum(["cashfree", "karza", "mock"]).default("mock"),
+    AADHAAR_OTP_VERIFIER: z.enum(["cashfree", "digilocker", "mock"]).default("mock"),
+    GSTIN_VERIFIER: z.enum(["cashfree", "karza", "mock"]).default("mock"),
+    DIGILOCKER_VERIFIER: z.enum(["cashfree", "mock"]).default("mock"),
+    DL_VERIFIER: z.enum(["cashfree", "mock"]).default("mock"),
+    PAN_GSTIN_VERIFIER: z.enum(["cashfree", "mock"]).default("mock"),
+
+
   })
   .superRefine((d, ctx) => {
     const need = (key: string, cond: string) =>
@@ -114,6 +132,9 @@ const schema = z
         need("SENDGRID_API_KEY", "EMAIL_PROVIDER=sendgrid");
       if (!d.SENDGRID_FROM_EMAIL)
         need("SENDGRID_FROM_EMAIL", "EMAIL_PROVIDER=sendgrid");
+    }
+    if (d.PENNY_DROP_PROVIDER === "cashfree" && !d.CASHFREE_WEBHOOK_SECRET) {
+      need("CASHFREE_WEBHOOK_SECRET", "PENNY_DROP_PROVIDER=cashfree");
     }
   });
 

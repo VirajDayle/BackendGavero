@@ -83,7 +83,7 @@ export type Actor = {
   /** The unique UUID of the user. */
   id: string;
   /** The list of role slugs assigned to the user. */
-  roles: string[];
+  roleIds: string[];
 };
 
 // ---------------------------------------------------------------------------
@@ -467,7 +467,7 @@ export const UserController = {
    * @returns Paginated user profile objects.
    */
   async list(pagination: Pagination, actor: Actor) {
-    const { items, total } = await UserService.list(pagination, actor.roles);
+    const { items, total } = await UserService.list(pagination, actor.roleIds);
     return paginatedRaw(items, pagination.page, pagination.limit, total);
   },
 
@@ -480,7 +480,7 @@ export const UserController = {
    * @returns The public profile data.
    */
   async getById(id: string, actor: Actor) {
-    return UserService.getById(id, actor.id, actor.roles);
+    return UserService.getById(id, actor.id, actor.roleIds);
   },
 
   /**
@@ -500,7 +500,7 @@ export const UserController = {
   ) {
     return UserService.update(id, body, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -522,7 +522,7 @@ export const UserController = {
   ) {
     return UserService.updateStatus(id, status, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -541,7 +541,7 @@ export const UserController = {
   ): Promise<void> {
     return UserService.softDelete(id, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -576,7 +576,7 @@ export const SessionController = {
   ): Promise<void> {
     return SessionService.revoke(sessionId, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -671,7 +671,7 @@ export const RoleController = {
    * @param actor - The requesting admin.
    */
   async list(actor: Actor) {
-    return RoleService.list(actor.roles);
+    return RoleService.list(actor.roleIds);
   },
 
   /**
@@ -689,7 +689,7 @@ export const RoleController = {
   ) {
     return RoleService.create(body, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -709,7 +709,7 @@ export const RoleController = {
   ): Promise<void> {
     return RoleService.delete(roleId, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -731,7 +731,7 @@ export const RoleController = {
   ): Promise<void> {
     return RoleService.assignToUser(userId, roleId, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -753,7 +753,7 @@ export const RoleController = {
   ): Promise<void> {
     return RoleService.revokeFromUser(userId, roleId, {
       actorId: actor.id,
-      actorRoles: actor.roles,
+      actorRoles: actor.roleIds,
       ip: meta.ip,
     });
   },
@@ -900,7 +900,7 @@ export const AuditController = {
       resource,
       resourceId,
       pagination,
-      actor.roles,
+      actor.roleIds,
     );
     return paginatedRaw(items, pagination.page, pagination.limit, total);
   },

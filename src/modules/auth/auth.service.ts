@@ -38,8 +38,11 @@ import type {
   Pagination,
   UserPublic,
   LoginFailureReason,
-  VerifyOtpRequest
+  VerifyOtpRequest,
+  VerifyDigilockerAccount,
 } from "./auth.schema";
+
+import { IdentityVerificationFactory } from "../../providers/verification/identity/identity.factory";
 
 import { mapToUserPublic } from "./auth.schema"; // ← value imports
 
@@ -47,10 +50,10 @@ import { NotificationService } from "./notification.service";
 import { AuthErrors } from "./auth.errors";
 import { db } from "../../db";
 import { env } from "../../config/env";
+import { roleCache } from "../../lib/role-cache";
 import { generateId, sha256Hex, hashPin, verifyPin } from "../../utils/hash";
 import { generateOtp } from "../../utils/otp";
 import { logger } from "../../core/logger";
-
 
 // Repos are now injected via dependency injection in the constructor.
 
@@ -66,6 +69,7 @@ export interface AuthRepositories {
   auditRepo: AuditLogRepository;
   deviceRepo: UserDeviceRepository;
   abuseRepo: RateLimitRepository;
+  kycProfileRepo: KycProfileRepository;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -83,7 +87,7 @@ const ACCESS_SECRET = new TextEncoder().encode(env.JWT_SECRET);
  * This token serves as a cryptographically signed proof that the user has
  * successfully verified an OTP. It must be presented to the `/register`
  * or `/login/otp` endpoints to complete the flow.
- * 
+ *
  * @param phone - The verified E.164 phone number.
  * @param purpose - The purpose for which the OTP was verified (e.g., 'phone_verification').
  * @returns A promise resolving to a signed HS256 JWT.
@@ -98,21 +102,47 @@ async function issueOtpToken(phone: string, purpose: string): Promise<string> {
     .sign(OTP_TOKEN_SECRET);
 }
 
+import { ROLES, type RoleSlug } from "../../shared";
+import { KycStatus } from "../profile/profile.schema";
+import { KycProfileRepository } from "../profile/profile.repository";
+
+const hasAnyRole = (userRoles: string[], rolesToCheck: string[]) =>
+  userRoles.some((role) => rolesToCheck.includes(role));
+
+/**
+ * Robustly checks if an actor has a specific role by its slug.
+ * Safely resolves the slug to its current UUID via the RoleCache.
+ */
+const hasRoleBySlug = (actorRoleIds: string[], slug: RoleSlug): boolean => {
+  try {
+    const roleId = roleCache.getId(slug);
+    return actorRoleIds.includes(roleId);
+  } catch (err) {
+    // If slug is unknown or cache not ready, fail-safe to false
+    return false;
+  }
+};
+
 /**
  * Signs a standard JWT access token for a user.
  * The payload includes the User ID (sub), the unique Access Token JTI,
  * the Session ID (sid), and the user's assigned roles.
- * 
+ *
  * @param payload - The data to include in the token.
- * @returns A promise resolving to a signed HS256 JWT.
+ * @returns A promise resolving to the signed HS256 JWT.
  */
 async function signAccessToken(payload: {
   sub: string;
   jti: string;
   sid: string;
-  roles: string[];
+  roleIds: string[];
+  kycStatus: Record<string, KycStatus>;
 }): Promise<string> {
-  return new SignJWT({ roles: payload.roles, sid: payload.sid })
+  return new SignJWT({
+    roleIds: payload.roleIds,
+    sid: payload.sid,
+    kycStatus: payload.kycStatus,
+  })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(payload.sub)
     .setJti(payload.jti)
@@ -164,7 +194,7 @@ export class AuthServiceImpl {
    * 5. Invalidates any existing active OTPs for this phone/purpose.
    * 6. Stores the new OTP record in the database within a transaction.
    * 7. Hands off the OTP to the NotificationService for SMS delivery.
-   * 
+   *
    * @param body - The request containing the user's phone number.
    * @param meta - Metadata containing the client's IP address.
    * @returns A promise resolving to the OTP expiration timestamp.
@@ -213,9 +243,16 @@ export class AuthServiceImpl {
     if (user) {
       // FIX: Use generic error for banned/suspended to prevent enumeration
       if (user.status === "banned" || user.status === "suspended") {
-        logger.warn({ phone, status: user.status }, "Send OTP attempted for restricted user");
+        logger.warn(
+          { phone, status: user.status },
+          "Send OTP attempted for restricted user",
+        );
         // We still return success to keep the attacker guessing
-        return { expiresAt: createDate(new TimeSpan(env.OTP_TTL_MIN, "m")).toISOString() };
+        return {
+          expiresAt: createDate(
+            new TimeSpan(env.OTP_TTL_MIN, "m"),
+          ).toISOString(),
+        };
       }
     }
 
@@ -260,7 +297,7 @@ export class AuthServiceImpl {
    * 5. Determines if the user is already registered (determines downstream UI flow).
    * 6. Issues a short-lived "OTP Bridge Token" (JWT) as proof of verification.
    * 7. Logs the successful verification event to the audit log.
-   * 
+   *
    * @param body - The request containing the phone and OTP code.
    * @param meta - Metadata containing the client's IP address for auditing.
    * @returns A promise resolving to registration status and the bridge token.
@@ -275,7 +312,10 @@ export class AuthServiceImpl {
     const phone = body.phone;
 
     // Look for a non-expired, non-consumed OTP.
-    const record = await this.repos.otpRepo.findActiveByPhone(phone, "phone_verification");
+    const record = await this.repos.otpRepo.findActiveByPhone(
+      phone,
+      "phone_verification",
+    );
     if (!record) throw AuthErrors.Otp.notFound();
 
     // 1. Increment attempts ATOMICALLY FIRST (TOCTOU protection).
@@ -347,7 +387,7 @@ export class AuthServiceImpl {
    *    - Generate the user's own unique referral code for future sharing.
    *    - Record the registration event in the audit log.
    * 5. Initializes the first login session and returns the access/refresh tokens.
-   * 
+   *
    * @param body - registration details (name, phone, optional referralCode).
    * @param meta - Metadata including IP, User Agent, and Device Info.
    * @returns A promise resolving to the session tokens and user data.
@@ -361,7 +401,6 @@ export class AuthServiceImpl {
       deviceInfo?: Record<string, unknown>;
     },
   ) {
-
     const phone = body.phone;
 
     const existing = await this.repos.userRepo.findByPhone(phone);
@@ -390,7 +429,9 @@ export class AuthServiceImpl {
         });
       } catch (err: any) {
         if (err.code === "23505") {
-          throw AuthErrors.User.alreadyExists("Phone number is already registered");
+          throw AuthErrors.User.alreadyExists(
+            "Phone number is already registered",
+          );
         }
         throw err;
       }
@@ -453,7 +494,7 @@ export class AuthServiceImpl {
    * 6. On failure: Increments the fail counter and locks the account if the threshold is reached.
    * 7. On success: Resets the fail counter, checks for 2FA requirement, and creates a new session.
    * 8. Records the auth attempt (success or failure) in the audit log.
-   * 
+   *
    * @param body - The request containing phone and PIN.
    * @param meta - Metadata including IP, User Agent, and Device Info.
    * @returns A promise resolving to the session tokens and user data.
@@ -590,6 +631,17 @@ export class AuthServiceImpl {
     return result;
   }
 
+  /**
+   * Marks a user's tokens as stale in Redis.
+   * Forces the next request from ANY of the user's active access tokens
+   * to fail with a 401 TOKEN_STALE, triggering a silent refresh.
+   */
+  async markTokensStale(userId: string, reason: string): Promise<void> {
+    const TTL = (env.JWT_ACCESS_TTL_MIN ?? 15) * 60;
+    await redis.setex(`stale_user:${userId}`, TTL, reason);
+    logger.info({ userId, reason }, "User tokens marked as stale");
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
@@ -599,7 +651,7 @@ export class AuthServiceImpl {
    * 3. Checks if the account exists and is not banned or suspended.
    * 4. Creates a new session and returns the tokens.
    * 5. Tracks the authentication event in the audit log.
-   * 
+   *
    * @param body - The request containing the `phone`.
    * @param meta - Metadata including IP, User Agent, and Device Info.
    * @returns A promise resolving to the session tokens and user data.
@@ -662,7 +714,7 @@ export class AuthServiceImpl {
    * 3. Marks the record as `logged_out` in the database.
    * 4. Blacklists the Access Token JTI in Redis for immediate global invalidation.
    * 5. Logs the logout event to the audit trail.
-   * 
+   *
    * @param sessionId - The UUID of the session to terminate.
    * @param meta - Metadata containing the actor ID and client IP.
    */
@@ -695,7 +747,7 @@ export class AuthServiceImpl {
    * Logs out ALL active sessions for the current user.
    * This is a critical security feature for users who have lost a device or suspect account compromise.
    * Revokes all active tokens and blacklists their JTIs.
-   * 
+   *
    * @param meta - Metadata containing the actor ID and client IP.
    */
   async signOutAll(meta: { actorId: string; ip: string }): Promise<void> {
@@ -728,7 +780,7 @@ export class AuthServiceImpl {
    * 5. Generates a new Access Token JTI (invalidating the old Access Token globally).
    * 6. Blacklists the old JTI in Redis for its remaining TTL.
    * 7. Returns a brand new Access Token and Refresh Token.
-   * 
+   *
    * @param rawRefreshToken - The raw refresh token string from the client.
    * @param meta - Metadata containing the client IP.
    * @returns A promise resolving to the new token pair and expiration Date.
@@ -749,13 +801,22 @@ export class AuthServiceImpl {
     // We store rotated tokens in Redis for a grace period (e.g., 5 mins).
     const reuseCheck = await redis.get(`rotated_rt:${tokenHash}`);
     if (reuseCheck) {
-      logger.warn({ tokenHash, sessionId: reuseCheck, ip: meta.ip }, "Refresh token reuse detected — revoking session");
+      logger.warn(
+        { tokenHash, sessionId: reuseCheck, ip: meta.ip },
+        "Refresh token reuse detected — revoking session",
+      );
       // Critical security action: Revoke the entire session as it may be compromised.
-      await this.repos.sessionRepo.revoke(reuseCheck, "refresh_token_reuse_detected");
-      throw AuthErrors.Auth.sessionExpired("Security breach: Token reuse detected");
+      await this.repos.sessionRepo.revoke(
+        reuseCheck,
+        "refresh_token_reuse_detected",
+      );
+      throw AuthErrors.Auth.sessionExpired(
+        "Security breach: Token reuse detected",
+      );
     }
 
-    const session = await this.repos.sessionRepo.findByRefreshTokenHash(tokenHash);
+    const session =
+      await this.repos.sessionRepo.findByRefreshTokenHash(tokenHash);
 
     // Only allow refresh for active, non-expired sessions.
     if (!session) {
@@ -764,12 +825,18 @@ export class AuthServiceImpl {
     }
 
     if (session.status !== "active") {
-      logger.warn({ sessionId: session.id, status: session.status }, "Refresh session is not active");
+      logger.warn(
+        { sessionId: session.id, status: session.status },
+        "Refresh session is not active",
+      );
       throw AuthErrors.Auth.sessionExpired();
     }
 
     if (session.expiresAt < new Date()) {
-      logger.warn({ sessionId: session.id, expiresAt: session.expiresAt }, "Refresh session expired");
+      logger.warn(
+        { sessionId: session.id, expiresAt: session.expiresAt },
+        "Refresh session expired",
+      );
       throw AuthErrors.Auth.sessionExpired();
     }
 
@@ -795,15 +862,29 @@ export class AuthServiceImpl {
     await blacklistSession(session, "rotated");
 
     // Build roles list for the JWT payload.
-    const userRoles = await this.repos.userRoleRepo.findByUserId(session.userId);
-    const roles = userRoles.map((r: { roleSlug: string }) => r.roleSlug);
+    const userRoles = await this.repos.userRoleRepo.findByUserId(
+      session.userId,
+    );
+    const roleIds = userRoles.map((r) => r.roleId);
+
+    const userRoleKyc = await this.repos.kycProfileRepo.listByUser(
+      session.userId,
+    );
+
+    const kycStatus = Object.fromEntries(
+      userRoleKyc.map((r) => [r.roleId, r.status]),
+    );
 
     const accessToken = await signAccessToken({
       sub: session.userId,
       jti: newJti,
       sid: session.id,
-      roles,
+      roleIds,
+      kycStatus,
     });
+
+    // 4. Success: Clear stale flag if present and return new tokens.
+    await redis.del(`stale_user:${session.userId}`);
 
     return {
       accessToken,
@@ -823,7 +904,7 @@ export class AuthServiceImpl {
    * 4. Metadata Update: Updates the user's `last_login_at` and `last_login_ip`.
    * 5. Audit: Logs the successful sign-in event.
    * 6. JWT Issuance: Signs the initial Access Token linked to this session's unique JTI.
-   * 
+   *
    * @param user - The user object (requires `id`).
    * @param method - The auth method used ('otp' or 'pin').
    * @param meta - Metadata from the HTTP request.
@@ -881,14 +962,23 @@ export class AuthServiceImpl {
     if (!fullUser) throw AuthErrors.User.sessionLoadFailed();
 
     const userRoles = await this.repos.userRoleRepo.findByUserId(user.id);
-    const roles = userRoles.map((r: { roleSlug: string }) => r.roleSlug);
+    const roleIds = userRoles.map((r) => r.roleId);
+
+    const userRoleKyc = await this.repos.kycProfileRepo.listByUser(
+      session.userId,
+    );
+
+    const kycStatus = Object.fromEntries(
+      userRoleKyc.map((r) => [r.roleId, r.status]),
+    );
 
     // 5. Issue final access token linked to this session JTI.
     const accessToken = await signAccessToken({
       sub: user.id,
       jti: accessTokenJti,
       sid: session.id,
-      roles,
+      roleIds,
+      kycStatus,
     });
 
     return {
@@ -917,7 +1007,7 @@ export class OtpServiceImpl {
   /**
    * Generates and sends a purpose-driven OTP to an authenticated user.
    * Purposes include `phone_verification`, `email_verification`, `two_factor_auth`, etc.
-   * 
+   *
    * @param body - The OTP request containing purpose and optional phone/email.
    * @param meta - Metadata containing the IP and actor ID.
    * @returns A promise resolving to the OTP expiration timestamp.
@@ -969,7 +1059,7 @@ export class OtpServiceImpl {
    * - `phone_verification`: Marks phone as verified.
    * - `enable_2fa`/`disable_2fa`: Toggles 2FA status.
    * - `pin_reset`/`delete_account`: Issues an OTP Bridge Token for the final action.
-   * 
+   *
    * @param body - The verification data (otp, purpose, optional target).
    * @param meta - Metadata containing IP and actor ID.
    * @returns A promise resolving to verification status and an optional bridge token.
@@ -985,11 +1075,20 @@ export class OtpServiceImpl {
 
     let record;
     if (body.phone) {
-      record = await this.repos.otpRepo.findActiveByPhone(body.phone, body.purpose);
+      record = await this.repos.otpRepo.findActiveByPhone(
+        body.phone,
+        body.purpose,
+      );
     } else if (body.email) {
-      record = await this.repos.otpRepo.findActiveByEmail(body.email, body.purpose);
+      record = await this.repos.otpRepo.findActiveByEmail(
+        body.email,
+        body.purpose,
+      );
     } else {
-      record = await this.repos.otpRepo.findActiveByUserAndPurpose(user.id, body.purpose);
+      record = await this.repos.otpRepo.findActiveByUserAndPurpose(
+        user.id,
+        body.purpose,
+      );
     }
 
     if (!record) throw AuthErrors.Otp.notFound();
@@ -1017,9 +1116,13 @@ export class OtpServiceImpl {
     // For phone_verification, it enables the registration/login flow.
     // For pin_reset and delete_account, it proof-of-ownership for the final action.
     let otpToken: string | undefined;
-    const bridgePurposes = ["phone_verification", "pin_reset", "delete_account"];
+    const bridgePurposes = [
+      "phone_verification",
+      "pin_reset",
+      "delete_account",
+    ];
     if (bridgePurposes.includes(body.purpose)) {
-      const subject = body.phone ?? (user.phone ?? user.id);
+      const subject = body.phone ?? user.phone ?? user.id;
       otpToken = await issueOtpToken(subject, body.purpose);
     }
 
@@ -1059,7 +1162,7 @@ export class PinServiceImpl {
   /**
    * Sets or updates the 6-digit security PIN for an authenticated user.
    * Revokes ALL active sessions immediately after a PIN change to ensure security.
-   * 
+   *
    * @param body - The new PIN and its confirmation.
    * @param meta - Metadata containing the actor ID and client IP.
    * @throws AuthErrors.Pin.format if not a 6-digit number.
@@ -1094,7 +1197,7 @@ export class PinServiceImpl {
    * Public Endpoint: Requests a PIN reset OTP.
    * To prevent phone enumeration, this method always returns success even if the phone
    * is not found in the database.
-   * 
+   *
    * @param phone - The E.164 phone number.
    * @param meta - Metadata containing the client IP.
    * @returns A promise resolving to the estimated expiration timestamp.
@@ -1148,7 +1251,7 @@ export class PinServiceImpl {
   /**
    * Public Endpoint: Completes a PIN reset using an OTP bridge token and a new PIN.
    * Validates the bridge token and revokes all active sessions upon success.
-   * 
+   *
    * @param body - The phone and new PIN details.
    * @param meta - Metadata containing the client IP.
    */
@@ -1192,7 +1295,7 @@ export class UserServiceImpl {
   /**
    * Retrieves a public user profile.
    * Enforces Ownership: Users can only view their own profile unless they have 'admin' roles.
-   * 
+   *
    * @param id - The UUID of the user to fetch.
    * @param actorId - The UUID of the requesting user.
    * @param actorRoles - The roles of the requesting user.
@@ -1203,7 +1306,7 @@ export class UserServiceImpl {
     actorId: string,
     actorRoles: string[],
   ): Promise<UserPublic> {
-    if (id !== actorId && !actorRoles.includes("admin"))
+    if (id !== actorId && !hasRoleBySlug(actorRoles, ROLES.ADMIN))
       throw AuthErrors.Common.forbidden();
     const user = await this.repos.userRepo.findById(id);
     if (!user) throw AuthErrors.User.notFound();
@@ -1213,7 +1316,7 @@ export class UserServiceImpl {
   /**
    * Admin Only: Manually updates a user's account status (e.g., active, banned, suspended).
    * Logs before/after states to the audit log.
-   * 
+   *
    * @param id - The UUID of the user to update.
    * @param newStatus - The target status.
    * @param meta - Metadata including actor roles and IP.
@@ -1223,7 +1326,7 @@ export class UserServiceImpl {
     newStatus: "active" | "suspended" | "deactivated" | "banned",
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ): Promise<void> {
-    if (!meta.actorRoles.includes("admin"))
+    if (!hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.User.adminRequired();
     const user = await this.repos.userRepo.findById(id);
     if (!user) throw AuthErrors.User.notFound();
@@ -1247,7 +1350,7 @@ export class UserServiceImpl {
 
   /**
    * Admin Only: Lists all active users with pagination.
-   * 
+   *
    * @param pagination - Pagination and ordering settings.
    * @param actorRoles - Roles of the requesting user.
    * @returns A promise resolving to the list of user profiles and total count.
@@ -1256,7 +1359,8 @@ export class UserServiceImpl {
     pagination: Pagination,
     actorRoles: string[],
   ): Promise<{ items: UserPublic[]; total: number }> {
-    if (!actorRoles.includes("admin")) throw AuthErrors.User.adminRequired();
+    if (!hasRoleBySlug(actorRoles, ROLES.ADMIN))
+      throw AuthErrors.User.adminRequired();
     const { items, total } = await this.repos.userRepo.list(pagination);
     return {
       items: items.map(mapToUserPublic),
@@ -1268,7 +1372,7 @@ export class UserServiceImpl {
    * Updates user profile data (name, email).
    * Note: Changing the email address automatically resets the `emailVerified` status
    * to false, requiring a new verification cycle.
-   * 
+   *
    * @param id - The UUID of the user to update.
    * @param body - The partial update data.
    * @param meta - Metadata containing the actor ID and roles.
@@ -1279,13 +1383,12 @@ export class UserServiceImpl {
     body: UpdateProfile,
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ): Promise<UserPublic> {
-    if (id !== meta.actorId && !meta.actorRoles.includes("admin"))
+    if (id !== meta.actorId && !hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.Common.forbidden();
     const before = await this.repos.userRepo.findById(id);
     if (!before) throw AuthErrors.User.notFound();
     if (body.email) {
-      if (!validateEmail(body.email))
-        throw AuthErrors.User.invalidEmail();
+      if (!validateEmail(body.email)) throw AuthErrors.User.invalidEmail();
       if (body.email !== before.email) {
         const taken = await this.repos.userRepo.findByEmail(body.email);
         if (taken) throw AuthErrors.User.emailConflict();
@@ -1313,7 +1416,7 @@ export class UserServiceImpl {
   /**
    * Performs a soft-delete on a user account.
    * This revokes all active sessions and marks the user record as deleted.
-   * 
+   *
    * @param id - The UUID of the user to delete.
    * @param meta - Metadata containing actor ID and roles.
    */
@@ -1321,7 +1424,7 @@ export class UserServiceImpl {
     id: string,
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ): Promise<void> {
-    if (id !== meta.actorId && !meta.actorRoles.includes("admin"))
+    if (id !== meta.actorId && !hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.Common.forbidden();
     const deleted = await this.repos.userRepo.softDelete(id, meta.actorId);
     if (!deleted) throw AuthErrors.User.notFound();
@@ -1336,6 +1439,52 @@ export class UserServiceImpl {
       resource: "user",
       resourceId: id,
     });
+  }
+
+  async markDigilockerExist(
+    id: string,
+    data: VerifyDigilockerAccount,
+    meta: { actorId: string; actorRoles: string[]; ip: string },
+  ): Promise<{ status: "ACCOUNT_EXISTS" | "ACCOUNT_NOT_FOUND" }> {
+    if (
+      !hasRoleBySlug(meta.actorRoles, ROLES.DELIVERY_PARTNER) &&
+      !hasRoleBySlug(meta.actorRoles, ROLES.SHOP_OWNER) &&
+      !hasRoleBySlug(meta.actorRoles, ROLES.ADMIN)
+    ) {
+      throw AuthErrors.Common.forbidden();
+    }
+
+    const verifier = IdentityVerificationFactory.getDigilockerVerifier();
+    const result = await verifier.verifyAccount(data);
+
+    if (result.status === "ACCOUNT_NOT_FOUND") {
+      return { status: "ACCOUNT_NOT_FOUND" };
+    }
+
+    await this.repos.userRepo.markDigilockerExist(
+      id,
+      result.digilockerId as string,
+    );
+
+    await this.repos.auditRepo.create({
+      actorId: meta.actorId,
+      actorIp: meta.ip,
+      action: "user.digilockerExist",
+      resource: "user",
+      resourceId: id,
+    });
+
+    return { status: "ACCOUNT_EXISTS" };
+  }
+
+  async DigilockerExist(id: string) {
+    const user = await this.repos.userRepo.findById(id);
+    if (!user) throw AuthErrors.User.notFound();
+
+    return {
+      digilockerLinked: user.digilockerLinked,
+      digilockerId: user.digilockerId,
+    };
   }
 }
 
@@ -1354,7 +1503,7 @@ export class SessionServiceImpl {
   /**
    * Lists the current user's own active sessions.
    * Sensitive internal hashes are stripped before returning.
-   * 
+   *
    * @param actorId - The UUID of the user.
    * @returns An array of active session metadata.
    */
@@ -1368,7 +1517,7 @@ export class SessionServiceImpl {
   /**
    * Revokes a specific session.
    * Enforces Ownership: Users can only revoke their own sessions unless they are admins.
-   * 
+   *
    * @param sessionId - The UUID of the session to revoke.
    * @param meta - Metadata containing actor ID and roles.
    */
@@ -1378,7 +1527,10 @@ export class SessionServiceImpl {
   ): Promise<void> {
     const session = await this.repos.sessionRepo.findById(sessionId);
     if (!session) throw AuthErrors.Session.notFound();
-    if (session.userId !== meta.actorId && !meta.actorRoles.includes("admin"))
+    if (
+      session.userId !== meta.actorId &&
+      !hasRoleBySlug(meta.actorRoles, ROLES.ADMIN)
+    )
       throw AuthErrors.Session.forbidden();
 
     // Blacklist JTI before revoking in DB
@@ -1408,19 +1560,30 @@ export class RoleServiceImpl {
   constructor(private readonly repos: AuthRepositories) { }
 
   /**
+   * Loads all roles from the database into the runtime RoleCache.
+   * This should be called during application bootstrap.
+   */
+  async loadToCache(): Promise<void> {
+    const roles = await this.repos.roleRepo.list();
+    roleCache.load(roles);
+    logger.info({ count: roles.length }, "Role cache initialized");
+  }
+
+  /**
    * Admin Only: Lists all role definitions in the system.
-   * 
+   *
    * @param actorRoles - The roles of the requester.
    */
   async list(actorRoles: string[]) {
-    if (!actorRoles.includes("admin")) throw AuthErrors.Role.adminRequired();
+    if (!hasRoleBySlug(actorRoles, ROLES.ADMIN))
+      throw AuthErrors.Role.adminRequired();
     return this.repos.roleRepo.list();
   }
 
   /**
    * Admin Only: Creates a new role definition.
    * Checks for slug uniqueness before insertion.
-   * 
+   *
    * @param body - Name, slug, and description of the role.
    * @param meta - Metadata including actor ID and roles.
    */
@@ -1428,7 +1591,7 @@ export class RoleServiceImpl {
     body: { name: string; slug: string; description?: string },
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ) {
-    if (!meta.actorRoles.includes("admin"))
+    if (!hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.Role.adminRequired();
     const existing = await this.repos.roleRepo.findBySlug(body.slug);
     if (existing) throw AuthErrors.Role.conflict(body.slug);
@@ -1447,7 +1610,7 @@ export class RoleServiceImpl {
   /**
    * Admin Only: Deletes a role definition.
    * Note: System-defined roles (isSystem: true) cannot be deleted.
-   * 
+   *
    * @param roleId - The UUID of the role.
    * @param meta - Metadata including actor ID and roles.
    */
@@ -1455,7 +1618,7 @@ export class RoleServiceImpl {
     roleId: string,
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ): Promise<void> {
-    if (!meta.actorRoles.includes("admin"))
+    if (!hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.Role.adminRequired();
     const deleted = await this.repos.roleRepo.delete(roleId);
     if (!deleted)
@@ -1471,7 +1634,7 @@ export class RoleServiceImpl {
 
   /**
    * Admin Only: Grants a specific role to a user.
-   * 
+   *
    * @param userId - The UUID of the target user.
    * @param roleId - The UUID of the role to assign.
    * @param meta - Metadata including actor ID and roles.
@@ -1481,13 +1644,17 @@ export class RoleServiceImpl {
     roleId: string,
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ): Promise<void> {
-    if (!meta.actorRoles.includes("admin"))
+    if (!hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.Role.adminRequired();
     const role = await this.repos.roleRepo.findById(roleId);
     if (!role) throw AuthErrors.Role.notFound();
     const user = await this.repos.userRepo.findById(userId);
     if (!user) throw AuthErrors.Role.userNotFound();
-    await this.repos.userRoleRepo.assign({ userId, roleId, assignedBy: meta.actorId });
+    await this.repos.userRoleRepo.assign({
+      userId,
+      roleId,
+      assignedBy: meta.actorId,
+    });
     await this.repos.auditRepo.create({
       actorId: meta.actorId,
       actorIp: meta.ip,
@@ -1500,7 +1667,7 @@ export class RoleServiceImpl {
 
   /**
    * Admin Only: Revokes a role assignment from a user.
-   * 
+   *
    * @param userId - The UUID of the target user.
    * @param roleId - The UUID of the role to revoke.
    * @param meta - Metadata including actor ID and roles.
@@ -1510,7 +1677,7 @@ export class RoleServiceImpl {
     roleId: string,
     meta: { actorId: string; actorRoles: string[]; ip: string },
   ): Promise<void> {
-    if (!meta.actorRoles.includes("admin"))
+    if (!hasRoleBySlug(meta.actorRoles, ROLES.ADMIN))
       throw AuthErrors.Role.adminRequired();
     const revoked = await this.repos.userRoleRepo.revoke(userId, roleId);
     if (!revoked) throw AuthErrors.Role.mappingNotFound();
@@ -1539,7 +1706,7 @@ export class ReferralServiceImpl {
 
   /**
    * Retrieves the referral code for the current user.
-   * 
+   *
    * @param actorId - The UUID of the user.
    * @returns A promise resolving to the user's referral code record.
    * @throws AuthErrors.Referral.notFound if no code exists.
@@ -1552,7 +1719,7 @@ export class ReferralServiceImpl {
 
   /**
    * Generates a new unique referral code for the user if one doesn't already exist.
-   * 
+   *
    * @param actorId - The UUID of the user.
    * @returns A promise resolving to the created or existing referral code record.
    */
@@ -1567,7 +1734,7 @@ export class ReferralServiceImpl {
 
   /**
    * Lists all users who were referred by the current user.
-   * 
+   *
    * @param actorId - The UUID of the user.
    * @param pagination - Pagination settings.
    * @returns A promise resolving to the paginated list of referrals.
@@ -1591,7 +1758,7 @@ export class DeviceServiceImpl {
 
   /**
    * Lists all devices that have ever signed into the user's account.
-   * 
+   *
    * @param actorId - The UUID of the user.
    * @returns An array of device records.
    */
@@ -1601,7 +1768,7 @@ export class DeviceServiceImpl {
 
   /**
    * Toggles the 'trusted' status of a specific device.
-   * 
+   *
    * @param deviceId - The UUID of the device record.
    * @param trusted - The new trust status.
    * @param meta - Metadata containing actor ID and IP.
@@ -1625,9 +1792,9 @@ export class DeviceServiceImpl {
   }
 
   /**
-   * Revokes a specific device. 
+   * Revokes a specific device.
    * Revoked devices are blocked from future logins using existing saved credentials.
-   * 
+   *
    * @param deviceId - The UUID of the device ID.
    * @param meta - Metadata containing actor ID and IP.
    */
@@ -1648,7 +1815,7 @@ export class DeviceServiceImpl {
 
   /**
    * Permanently removes a device record from the user's history.
-   * 
+   *
    * @param deviceId - The UUID of the device.
    * @param meta - Metadata containing actor ID and IP.
    */
@@ -1682,7 +1849,7 @@ export class AuditServiceImpl {
 
   /**
    * Lists audit logs where the authenticated user was the primary actor.
-   * 
+   *
    * @param actorId - The UUID of the user.
    * @param pagination - Pagination settings.
    * @returns A promise resolving to the list of audit logs.
@@ -1693,7 +1860,7 @@ export class AuditServiceImpl {
 
   /**
    * Admin Only: Lists audit activity for a specific resource type and ID.
-   * 
+   *
    * @param resource - The resource type (e.g., 'user', 'session').
    * @param resourceId - The UUID of the resource.
    * @param pagination - Pagination settings.
@@ -1705,8 +1872,13 @@ export class AuditServiceImpl {
     pagination: Pagination,
     actorRoles: string[],
   ) {
-    if (!actorRoles.includes("admin")) throw AuthErrors.Audit.adminRequired();
-    return this.repos.auditRepo.listByResource(resource, resourceId, pagination);
+    if (!hasRoleBySlug(actorRoles, ROLES.ADMIN))
+      throw AuthErrors.Audit.adminRequired();
+    return this.repos.auditRepo.listByResource(
+      resource,
+      resourceId,
+      pagination,
+    );
   }
 }
 
@@ -1721,7 +1893,8 @@ export const defaultRepos: AuthRepositories = {
   referralCodeRepo: new ReferralCodeRepository(db),
   auditRepo: new AuditLogRepository(db),
   deviceRepo: new UserDeviceRepository(db),
-  abuseRepo: new RateLimitRepository(db)
+  abuseRepo: new RateLimitRepository(db),
+  kycProfileRepo: new KycProfileRepository(db),
 };
 
 export const AuthService = new AuthServiceImpl(defaultRepos);

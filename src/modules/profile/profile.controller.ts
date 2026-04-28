@@ -1,13 +1,3 @@
-/**
- * modules/profile/profile.controller.ts
- *
- * Thin HTTP layer — delegates to profile services, shapes responses.
- * Never touches the database directly.
- * Follows the same conventions as auth.controller.ts.
- */
-
-import type { AuthUser } from "../../middleware/auth.middleware";
-
 import {
   BankAccountService,
   KycDocumentService,
@@ -18,380 +8,367 @@ import {
   CompositeProfileService,
 } from "./profile.service";
 
-// ── Context type ──────────────────────────────────────────────────────────────
-// Subset of the Elysia context relevant to controllers.
+import {
+  mapToAddressPublic,
+  mapToBankAccountPublic,
+  mapToCustomerProfilePublic,
+  mapToDeliveryPartnerProfilePublic,
+  mapToKycDocumentPublic,
+  mapToShopOwnerProfilePublic,
+} from "./profile.schema";
 
+import type {
+  AddBankAccount,
+  ConfirmPennyDrop,
+  AddressInsert,
+  AddressUpdate,
+  ReviewKyc,
+  SubmitKyc,
+  ShopOwnerOnboardRequest,
+  UpdateShopOwnerRequest,
+  DeliveryPartnerOnboardRequest,
+  UpdateDeliveryPartnerRequest,
+  VerifyPan,
+  VerifyPanGstin,
+  VerifyGstin,
+  VerifyDrivingLicense,
+  VerifyDigilockerAccount,
+  CreateDigilockerUrl,
+  GetDigilockerDetails,
+  DigilockerDocumentType,
+} from "./profile.schema";
+
+import type { Pagination } from "../../shared";
+
+// ── Shared Types ─────────────────────────────────────────────────────────────
+
+/** Metadata about the request environment. */
 export type Meta = {
-  /** The client's original IP address (resolved via proxy if TRUST_PROXY is enabled). */
   ip: string;
-  /** The raw User-Agent string from the client. */
-  userAgent: string;
+  userAgent?: string;
 };
 
-/**
- * Represents the authenticated actor (user).
- */
+/** Authenticated actor identity. */
 export type Actor = {
-  /** The unique UUID of the user. */
   id: string;
-  /** The list of role slugs assigned to the user. */
   roles: string[];
 };
 
-// =============================================================================
-// COMPOSITE PROFILE
-// =============================================================================
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-export const ProfileController =  {
-  async getFullProfile(id: string, actor: Actor) {
-    return await CompositeProfileService.getFullProfile(id, );
-  }
-}
+/** Maps Actor and Meta to Service-layer ActorMeta. */
+const toActorMeta = (actor: Actor, meta: Meta) => ({
+  actorId: actor.id,
+  actorRoles: actor.roles,
+  ip: meta.ip,
+});
 
-// =============================================================================
-// BANK ACCOUNTS
-// =============================================================================
+// ═════════════════════════════════════════════════════════════════════════════
+// 1. Composite Profile Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-export abstract class BankAccountController {
-  static async add(
-    body: {
-      accountHolderName: string;
-      accountNumber: string;
-      ifscCode: string;
-      bankName: string;
-      branchName?: string;
-      accountType?: "savings" | "current" | "salary";
-      upiId?: string;
-      setAsPrimary?: boolean;
-    },
-    ctx: Ctx,
-  ) {
-    const account = await BankAccountService.add(body, actorSimple(ctx));
-    // Strip encrypted field from response
-    const { accountNumberEncrypted: _, ...safe } = account;
-    return safe;
-  }
+export const ProfileController = {
+  /** Aggregates all user-related profile information for the 'me' view. */
+  async getFullProfile(actor: Actor) {
+    return await CompositeProfileService.getFullProfile(actor.id);
+  },
+};
 
-  static async list(ctx: Ctx) {
-    const accounts = await BankAccountService.listByUser(
-      ctx.user.id,
-      actor(ctx),
-    );
-    // Strip encrypted fields
-    const safe = accounts.map(({ accountNumberEncrypted: _, ...rest }) => rest);
-    return safe;
-  }
+// ═════════════════════════════════════════════════════════════════════════════
+// 2. Bank Account Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-  static async setPrimary(accountId: string, ctx: Ctx) {
-    return await BankAccountService.setPrimary(
-      accountId,
-      actorSimple(ctx),
-    );
-  }
+export const BankAccountController = {
+  /**
+   * Add a bank account.
+   * Verifies the account via the bank API and saves it with isVerified=false.
+   * Penny drop is required separately to mark it verified.
+   */
+  async add(body: AddBankAccount, actor: Actor, meta: Meta) {
+    const account = await BankAccountService.add(body, toActorMeta(actor, meta));
+    return mapToBankAccountPublic(account);
+  },
 
-  static async markVerified(
+  async list(actor: Actor, meta: Meta) {
+    const res = await BankAccountService.listByUser(actor.id, toActorMeta(actor, meta));
+    return res.items.map(mapToBankAccountPublic);
+  },
+
+  /**
+   * Initiate penny drop — returns UPI deep-links for the user to send ₹1.
+   */
+  async initiatePennyDrop(accountId: string, actor: Actor, meta: Meta) {
+    return await BankAccountService.initiatePennyDrop(accountId, toActorMeta(actor, meta));
+  },
+
+  /**
+   * Confirm penny drop — checks status, matches account details, marks verified.
+   */
+  async confirmPennyDrop(
     accountId: string,
-    body: { pennyDropRef: string },
-    ctx: Ctx,
+    body: ConfirmPennyDrop,
+    actor: Actor,
+    meta: Meta,
   ) {
-    return await BankAccountService.markVerified(
+    const updated = await BankAccountService.confirmPennyDrop(
       accountId,
-      body.pennyDropRef,
-      actor(ctx),
+      body.verificationId,
+      toActorMeta(actor, meta),
     );
-  }
+    return mapToBankAccountPublic(updated);
+  },
 
-  static async softDelete(accountId: string, ctx: Ctx) {
-    await BankAccountService.softDelete(accountId, actorSimple(ctx));
-    return { deleted: true };
-  }
-}
+  async setPrimary(accountId: string, actor: Actor, meta: Meta) {
+    await BankAccountService.setPrimary(accountId, toActorMeta(actor, meta));
+    return { success: true };
+  },
 
-// =============================================================================
-// KYC DOCUMENTS
-// =============================================================================
+  async softDelete(accountId: string, actor: Actor, meta: Meta) {
+    await BankAccountService.softDelete(accountId, toActorMeta(actor, meta));
+    return { success: true };
+  },
+};
 
-export abstract class KycDocumentController {
-  static async submit(
-    body: {
-      documentType: string;
-      documentNumberEncrypted?: string;
-      documentNumberLast4?: string;
-      frontImageKey?: string;
-      backImageKey?: string;
-      selfieImageKey?: string;
-    },
-    ctx: Ctx,
-  ) {
-    const doc = await KycDocumentService.submit(body, actorSimple(ctx));
-    // Strip sensitive fields
-    const {
-      documentNumberEncrypted: _d,
-      verificationResponse: _v,
-      verificationRef: _r,
-      ...safe
-    } = doc;
-    return safe;
-  }
+// ═════════════════════════════════════════════════════════════════════════════
+// 3. KYC Document Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-  static async review(
-    docId: string,
-    body: {
-      status: "verified" | "rejected" | "under_review";
-      rejectionReason?: string;
-    },
-    ctx: Ctx,
-  ) {
-    return await KycDocumentService.review(docId, body, actor(ctx));
-  }
+export const KycDocumentController = {
+  async submit(body: SubmitKyc, actor: Actor, meta: Meta) {
+    const doc = await KycDocumentService.submit(body, toActorMeta(actor, meta));
+    return mapToKycDocumentPublic(doc);
+  },
 
-  static async listByUser(
-    pagination: { page: number; limit: number },
-    ctx: Ctx,
-  ) {
-    const { items, total } = await KycDocumentService.listByUser(
-      ctx.user.id,
+  async listByUser(pagination: Pagination, actor: Actor, meta: Meta) {
+    const res = await KycDocumentService.listByUser(
+      actor.id,
       pagination,
-      actor(ctx),
+      toActorMeta(actor, meta),
     );
+    return {
+      items: res.items.map(mapToKycDocumentPublic),
+      total: res.total,
+    };
+  },
 
-    // Strip sensitive fields
-    const safe = items.map(
-      ({
-        documentNumberEncrypted: _d,
-        verificationResponse: _v,
-        verificationRef: _r,
-        ...rest
-      }) => rest,
+  async listPending(pagination: Pagination, actor: Actor, meta: Meta) {
+    const res = await KycDocumentService.listPending(pagination, toActorMeta(actor, meta));
+    return {
+      items: res.items.map(mapToKycDocumentPublic),
+      total: res.total,
+    };
+  },
+
+  async review(docId: string, body: ReviewKyc, actor: Actor, meta: Meta) {
+    const updated = await KycDocumentService.review(docId, body, toActorMeta(actor, meta));
+    return mapToKycDocumentPublic(updated);
+  },
+
+  async verifyPan(body: VerifyPan, actor: Actor, meta: Meta) {
+    return await KycDocumentService.verifyPan(body, toActorMeta(actor, meta));
+  },
+
+  async verifyPanGstin(body: VerifyPanGstin, actor: Actor, meta: Meta) {
+    return await KycDocumentService.verifyPanGstin(
+      body,
+      toActorMeta(actor, meta),
     );
+  },
 
-    return { items: safe, total };
-  }
+  async verifyDl(body: VerifyDrivingLicense, actor: Actor, meta: Meta) {
+    return await KycDocumentService.verifyDrivingLicense(
+      body,
+      toActorMeta(actor, meta),
+    );
+  },
 
-  static async listPending(
-    pagination: { page: number; limit: number },
-    ctx: Ctx,
+
+  async verifyGstin(body: VerifyGstin, actor: Actor, meta: Meta) {
+    return await KycDocumentService.verifyGstin(body, toActorMeta(actor, meta));
+  },
+
+  async verifyDigilockerAccount(
+    body: VerifyDigilockerAccount,
+    actor: Actor,
+    meta: Meta,
   ) {
-    const { items, total } = await KycDocumentService.listPending(
-      pagination,
-      actor(ctx),
+    return await KycDocumentService.verifyDigilockerAccount(
+      body,
+      toActorMeta(actor, meta),
     );
+  },
 
-    // Strip sensitive fields before sending to admin (who might not need the ciphertext)
-    const safe = items.map(
-      ({
-        documentNumberEncrypted: _d,
-        verificationResponse: _v,
-        verificationRef: _r,
-        ...rest
-      }) => rest,
+  async createDigilockerUrl(
+    body: CreateDigilockerUrl,
+    actor: Actor,
+    meta: Meta,
+  ) {
+    return await KycDocumentService.createDigilockerUrl(
+      body,
+      toActorMeta(actor, meta),
     );
+  },
 
-    return { items: safe, total };
-  }
-}
-
-// =============================================================================
-// ADDRESSES
-// =============================================================================
-
-export abstract class AddressController {
-  static async create(
-    body: {
-      label?: string;
-      customLabel?: string;
-      line1: string;
-      line2?: string;
-      landmark?: string;
-      cityId: string;
-      pincode: string;
-      state: string;
-      country?: string;
-      latitude: number;
-      longitude: number;
-    },
-    ctx: Ctx,
+  async getDigilockerDetails(
+    query: GetDigilockerDetails,
+    actor: Actor,
+    meta: Meta,
   ) {
-    return await AddressService.create(body, actorSimple(ctx));
-  }
+    return await KycDocumentService.getDigilockerDetails(
+      query,
+      toActorMeta(actor, meta),
+    );
+  },
+};
 
-  static async getById(addressId: string, ctx: Ctx) {
-    return await AddressService.getById(addressId, actorSimple(ctx));
-  }
+// ═════════════════════════════════════════════════════════════════════════════
+// 4. Address Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-  static async update(
-    addressId: string,
-    body: {
-      label?: string;
-      customLabel?: string;
-      line1?: string;
-      line2?: string;
-      landmark?: string;
-      pincode?: string;
-      state?: string;
-      country?: string;
-      latitude?: number;
-      longitude?: number;
-    },
-    ctx: Ctx,
-  ) {
-    return await AddressService.update(
+export const AddressController = {
+  async create(body: AddressInsert, actor: Actor, meta: Meta) {
+    const address = await AddressService.create(body, toActorMeta(actor, meta));
+    return mapToAddressPublic(address);
+  },
+
+  async update(addressId: string, body: AddressUpdate, actor: Actor, meta: Meta) {
+    const updated = await AddressService.update(
       addressId,
       body,
-      actorSimple(ctx),
+      toActorMeta(actor, meta),
     );
-  }
+    return mapToAddressPublic(updated);
+  },
 
-  static async setDefault(addressId: string, ctx: Ctx) {
-    return await AddressService.setDefault(
-      addressId,
-      actorSimple(ctx),
-    );
-  }
+  async getById(addressId: string, actor: Actor, meta: Meta) {
+    const address = await AddressService.getById(addressId, toActorMeta(actor, meta));
+    return mapToAddressPublic(address);
+  },
 
-  static async softDelete(addressId: string, ctx: Ctx) {
-    await AddressService.softDelete(addressId, actorSimple(ctx));
-    return { deleted: true };
-  }
+  async list(actor: Actor, meta: Meta) {
+    const res = await AddressService.listByUser(actor.id, toActorMeta(actor, meta));
+    return res.items.map(mapToAddressPublic);
+  },
 
-  static async list(ctx: Ctx) {
-    return await AddressService.listByUser(
-      ctx.user.id,
-      actor(ctx),
-    );
-  }
-}
+  async setDefault(addressId: string, actor: Actor, meta: Meta) {
+    await AddressService.setDefault(addressId, toActorMeta(actor, meta));
+    return { success: true };
+  },
 
-// =============================================================================
-// SHOP OWNER
-// =============================================================================
+  async softDelete(addressId: string, actor: Actor, meta: Meta) {
+    await AddressService.softDelete(addressId, toActorMeta(actor, meta));
+    return { success: true };
+  },
+};
 
-export abstract class ShopOwnerController {
-  static async onboard(
-    body: {
-      businessName?: string;
-      businessType?: string;
-      tradeName?: string;
-    },
-    ctx: Ctx,
-  ) {
-    return await ShopOwnerService.onboard(body, actorSimple(ctx));
-  }
+// ═════════════════════════════════════════════════════════════════════════════
+// 5. Shop Owner Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-  static async getProfile(ctx: Ctx) {
-    return await ShopOwnerService.getProfile(ctx.user.id);
-  }
+export const ShopOwnerController = {
+  async onboard(body: ShopOwnerOnboardRequest, actor: Actor, meta: Meta) {
+    const profile = await ShopOwnerService.onboard(body as any, toActorMeta(actor, meta));
+    return mapToShopOwnerProfilePublic(profile);
+  },
 
-  static async update(
-    body: {
-      businessName?: string;
-      businessType?: string;
-      tradeName?: string;
-      primaryBankAccountId?: string;
-      metadata?: Record<string, unknown>;
-    },
-    ctx: Ctx,
-  ) {
-    return await ShopOwnerService.update(
-      body,
-      actorSimple(ctx),
-    );
-  }
+  async getProfile(actor: Actor) {
+    const profile = await ShopOwnerService.getProfile(actor.id);
+    return mapToShopOwnerProfilePublic(profile);
+  },
 
-  static async suspend(
+  async update(body: UpdateShopOwnerRequest, actor: Actor, meta: Meta) {
+    const updated = await ShopOwnerService.update(body as any, toActorMeta(actor, meta));
+    return mapToShopOwnerProfilePublic(updated);
+  },
+
+  async suspend(
     userId: string,
-    body: { suspensionReason: string },
-    ctx: Ctx,
+    body: { suspensionReason?: string },
+    actor: Actor,
+    meta: Meta,
   ) {
-    return await ShopOwnerService.suspend(
+    const suspended = await ShopOwnerService.suspend(
       userId,
-      body.suspensionReason,
-      actor(ctx),
+      body.suspensionReason || "No reason provided",
+      toActorMeta(actor, meta),
     );
-  }
+    return mapToShopOwnerProfilePublic(suspended);
+  },
 
-  static async unsuspend(userId: string, ctx: Ctx) {
-    return await ShopOwnerService.unsuspend(userId, actor(ctx));
-  }
-}
+  async unsuspend(userId: string, actor: Actor, meta: Meta) {
+    const unsuspended = await ShopOwnerService.unsuspend(userId, toActorMeta(actor, meta));
+    return mapToShopOwnerProfilePublic(unsuspended);
+  },
+};
 
-// =============================================================================
-// DELIVERY PARTNER
-// =============================================================================
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. Delivery Partner Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-export abstract class DeliveryPartnerController {
-  static async onboard(
-    body: {
-      vehicleType?: string;
-      vehicleNumber?: string;
-      licenseNumber: string;
-      cityId: string;
-    },
-    ctx: Ctx,
-  ) {
-    return await DeliveryPartnerService.onboard(
-      body,
-      actorSimple(ctx),
+export const DeliveryPartnerController = {
+  async onboard(body: DeliveryPartnerOnboardRequest, actor: Actor, meta: Meta) {
+    const profile = await DeliveryPartnerService.onboard(
+      body as any,
+      toActorMeta(actor, meta),
     );
-  }
+    return mapToDeliveryPartnerProfilePublic(profile);
+  },
 
-  static async getProfile(ctx: Ctx) {
-    return await DeliveryPartnerService.getProfile(ctx.user.id);
-  }
+  async getProfile(actor: Actor) {
+    const profile = await DeliveryPartnerService.getProfile(actor.id);
+    return mapToDeliveryPartnerProfilePublic(profile);
+  },
 
-  static async update(
-    body: {
-      vehicleType?: string;
-      vehicleNumber?: string;
-      cityId?: string;
-      primaryBankAccountId?: string;
-      metadata?: Record<string, unknown>;
-    },
-    ctx: Ctx,
-  ) {
-    return await DeliveryPartnerService.update(
-      body,
-      actorSimple(ctx),
+  async update(body: UpdateDeliveryPartnerRequest, actor: Actor, meta: Meta) {
+    const updated = await DeliveryPartnerService.update(
+      body as any,
+      toActorMeta(actor, meta),
     );
-  }
+    return mapToDeliveryPartnerProfilePublic(updated);
+  },
 
-
-  static async suspend(
+  async suspend(
     userId: string,
-    body: { suspensionReason: string },
-    ctx: Ctx,
+    body: { suspensionReason?: string },
+    actor: Actor,
+    meta: Meta,
   ) {
-    return await DeliveryPartnerService.suspend(
+    const suspended = await DeliveryPartnerService.suspend(
       userId,
-      body.suspensionReason,
-      actor(ctx),
+      body.suspensionReason || "No reason provided",
+      toActorMeta(actor, meta),
     );
-  }
+    return mapToDeliveryPartnerProfilePublic(suspended);
+  },
 
-  static async unsuspend(userId: string, ctx: Ctx) {
-    return await DeliveryPartnerService.unsuspend(
+  async unsuspend(userId: string, actor: Actor, meta: Meta) {
+    const unsuspended = await DeliveryPartnerService.unsuspend(
       userId,
-      actor(ctx),
+      toActorMeta(actor, meta),
     );
-  }
-}
+    return mapToDeliveryPartnerProfilePublic(unsuspended);
+  },
+};
 
-// =============================================================================
-// CUSTOMER
-// =============================================================================
+// ═════════════════════════════════════════════════════════════════════════════
+// 7. Customer Controller
+// ═════════════════════════════════════════════════════════════════════════════
 
-export abstract class CustomerController {
-  static async getProfile(ctx: Ctx) {
-    return await CustomerService.getOrCreate(ctx.user.id);
-  }
+export const CustomerController = {
+  async getProfile(actor: Actor) {
+    const profile = await CustomerService.getOrCreate(actor.id);
+    return mapToCustomerProfilePublic(profile!);
+  },
 
-  static async updatePreferences(
+  async updatePreferences(
     body: { preferences: Record<string, unknown> },
-    ctx: Ctx,
+    actor: Actor,
+    meta: Meta,
   ) {
-    return await CustomerService.updatePreferences(
+    const updated = await CustomerService.updatePreferences(
       body.preferences,
-      actorSimple(ctx),
+      toActorMeta(actor, meta),
     );
-  }
-}
+    return mapToCustomerProfilePublic(updated);
+  },
+};

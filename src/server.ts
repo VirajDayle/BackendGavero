@@ -12,8 +12,17 @@ import { app } from "./app";
 import { env } from "./config/env";
 import { redis } from "./config/redis";
 import { logger } from "./core/logger";
+import { RoleService } from "./modules/auth/auth.service";
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+
+// Initialize runtime caches before accepting traffic
+try {
+  await RoleService.loadToCache();
+} catch (err) {
+  logger.error({ err }, "Failed to initialize role cache");
+  process.exit(1); 
+}
 
 app.listen({ port: env.PORT, hostname: env.HOST }, () => {
   logger.info(

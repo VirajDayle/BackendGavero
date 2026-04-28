@@ -4,44 +4,72 @@
  * Role-Based Access Control (RBAC) guard.
  * Ensures an authenticated user has the required roles to access a route.
  *
+ * Flow:
+ *   1. rbacGuard receives allowed role slugs (e.g. "admin", "shop_owner")
+ *   2. Resolves slugs → UUIDs via RoleCache (zero DB/network hit)
+ *   3. Checks user.roleIds (UUIDs from JWT) against resolved IDs
+ *
+ * This design keeps JWTs stable (IDs don't change on slug rename)
+ * while keeping route definitions readable (ROLES.ADMIN not a UUID).
+ *
  * Usage:
- *   new Elysia().use(jwtAuthPlugin).use(rbacGuard(['admin'])).get("/admin-only", () => ...)
+ *   import { ROLES } from "../constants/roles";
+ *
+ *   new Elysia()
+ *     .use(jwtAuthPlugin)
+ *     .use(rbacPlugin([ROLES.ADMIN, ROLES.SUPER_ADMIN]))
+ *     .get("/admin-only", ({ actor }) => actor)
  */
 
 import Elysia from "elysia";
 import { AuthErrors } from "../modules/auth/auth.errors";
+import { roleCache } from "../lib/role-cache";
+import { ROLES, type RoleSlug } from "../shared";
 import type { AuthUser } from "./auth.middleware";
+import { logger } from "../core/logger";
 
 /**
- * Creates a hook function that enforces specific roles.
- * Best for use in `beforeHandle`.
- *
- * @param allowedRoles - Array of roles that are permitted to access the route.
+ * Hook function that enforces role access.
+ * Use directly in beforeHandle if you need fine-grained control per route.
  */
-export const rbacGuard = (allowedRoles: string[]) => ({ user }: { user?: AuthUser }) => {
-  if (!user) {
-    throw AuthErrors.Common.unauthorized();
-  }
+export const rbacGuard =
+  (allowedSlugs: RoleSlug[]) =>
+    ({ user }: { user?: AuthUser }) => {
+      if (!user) {
+        throw AuthErrors.Common.unauthorized();
+      }
 
-  const hasAccess = allowedRoles.some((role) => user.roles.includes(role));
+      // Resolve slugs → IDs via in-memory cache (throws if slug unknown)
+      const allowedIds = allowedSlugs.map((slug) => roleCache.getId(slug));
 
-  if (!hasAccess) {
-    console.warn(
-      `[RBAC] Access denied for user ${user.id}. Required roles: [${allowedRoles.join(
-        ", ",
-      )}], User roles: [${user.roles.join(", ")}]`,
-    );
-    throw AuthErrors.Common.forbidden("Insufficient permissions for this resource");
-  }
-};
+      const superAdminId = roleCache.getId(ROLES.SUPER_ADMIN);
+      const hasAccess =
+        user.roleIds.includes(superAdminId) ||
+        allowedIds.some((id) => user.roleIds.includes(id));
+
+      if (!hasAccess) {
+        logger.warn(
+          `[RBAC] Access denied for user ${user.id}. ` +
+          `Required: [${allowedSlugs.join(", ")}], ` +
+          `User roleIds: [${user.roleIds.join(", ")}]`,
+        );
+        throw AuthErrors.Common.forbidden(
+          "Insufficient permissions for this resource",
+        );
+      }
+    };
 
 /**
- * Creates a middleware plugin that enforces specific roles for an entire Elysia instance or group.
+ * Plugin that enforces roles for an entire Elysia group.
+ * Also exposes `actor` (typed AuthUser) for convenience in handlers.
  *
- * @param allowedRoles - Array of roles that are permitted.
+ * Always mount AFTER jwtAuthPlugin so ctx.user is populated.
  */
-export const rbacPlugin = (allowedRoles: string[]) => (app: Elysia) =>
+export const rbacPlugin = (allowedSlugs: RoleSlug[]) => (app: Elysia) =>
   app.derive({ as: "scoped" }, (ctx: any) => {
-    rbacGuard(allowedRoles)(ctx);
+    rbacGuard(allowedSlugs)(ctx);
     return { actor: ctx.user as AuthUser };
   });
+
+export { ROLES };
+export type { RoleSlug };

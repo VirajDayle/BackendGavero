@@ -39,7 +39,7 @@ import {
 //
 //   ── SHOP EARNINGS ──────────────────────────────────────────────────────────
 //   4.  Shop Earnings Ledger  (append-only, every shop earning event)
-//   5.  Shop Payouts          (periodic settlement to shopkeeper's bank)
+//   5.  Shop Payouts          (periodic settlement to shop_owner's bank)
 //
 //   ── TAX ────────────────────────────────────────────────────────────────────
 //   6.  Tax Categories        (GST slab definitions: 0/5/12/18/28%)
@@ -455,7 +455,7 @@ export const shopEarningsLedgerTable = table(
 
 // =============================================================================
 // SECTION 5 — SHOP PAYOUTS
-// Periodic settlement of shop earnings to the shopkeeper's bank account.
+// Periodic settlement of shop earnings to the shop_owner's bank account.
 // =============================================================================
 
 export const shopPayoutsTable = table(

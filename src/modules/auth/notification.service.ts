@@ -33,7 +33,7 @@ async function post<T>(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`[Notification] HTTP ${res.status} from ${url}: ${text}`);
+    throw new Error(`Verification HTTP ${res.status} from ${url}: ${text}`);
   }
 }
 

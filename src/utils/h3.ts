@@ -53,7 +53,7 @@ export function polyfill(
   );
 }
 /** City-level clustering — ~1.22 km hex edge */
-export const H3_RES_CITY = 7;
+export const H3_RES_CITY = 8;
 
 /** Neighbourhood-level — ~174 m hex edge */
 export const H3_RES_NEIGHBOURHOOD = 9;
@@ -82,9 +82,9 @@ export function coordsToH3(
 export function coordsToH3Multi(
   lat: number,
   lng: number,
-): { res7: string; res9: string } {
+): { res8: string; res9: string } {
   return {
-    res7: latLngToCell(lat, lng, H3_RES_CITY),
+    res8: latLngToCell(lat, lng, H3_RES_CITY),
     res9: latLngToCell(lat, lng, H3_RES_NEIGHBOURHOOD),
   };
 }
@@ -105,3 +105,4 @@ export function coordsToH3Multi(
 export function h3KRing(h3Index: string, k: number): string[] {
   return gridDisk(h3Index, k);
 }
+

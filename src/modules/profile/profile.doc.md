@@ -48,7 +48,7 @@ Prefix: `/profile`
     "phone": "+919876543210",
     "status": "active"
   },
-  "roles": ["customer", "delivery_driver"],
+  "roles": ["customer", "delivery_partner"],
   "customerProfile": { ... },
   "deliveryPartnerProfile": { ... },
   "shopOwnerProfile": null,
@@ -293,13 +293,13 @@ Prefix: `/kyc`
 ### POST `/kyc/submit`
 
 **Visibility:** Protected (JWT required)
-**Summary:** Submit a KYC document for review (e.g., Aadhaar, PAN, Driving License).
+**Summary:** Submit a KYC document for review (e.g., PAN, Driving License).
 
 **Request body**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `documentType` | `enum` | ✅ | `aadhaar`, `pan`, `driving_license`, etc. |
+| `documentType` | `enum` | ✅ | `pan`, `driving_license`, etc. |
 | `documentNumberEncrypted`| `string`| ❌ | Opaque string containing encrypted document ID. |
 | `documentNumberLast4`| `string` | ❌ | Last 4 chars. |
 | `frontImageKey` | `string` | ❌ | Object store upload key. |
@@ -322,7 +322,7 @@ Prefix: `/shop-owner`
 ### POST `/shop-owner/onboard`
 
 **Visibility:** Protected (JWT required)
-**Summary:** Onboard the authenticated user into the Shop Owner role. Grants the `shopkeeper` role upon success. Returns idempotently if already registered.
+**Summary:** Onboard the authenticated user into the Shop Owner role. Grants the `shop_owner` role upon success. Returns idempotently if already registered.
 
 **Request body**
 
@@ -336,14 +336,14 @@ Prefix: `/shop-owner`
 
 ### GET `/shop-owner/me`
 
-**Visibility:** Protected (JWT required · shopkeeper role only)
+**Visibility:** Protected (JWT required · shop_owner role only)
 **Summary:** Fetch the shop owner profile info including terminal KYC status for business.
 
 ---
 
 ### PATCH `/shop-owner/me`
 
-**Visibility:** Protected (JWT required · shopkeeper role only)
+**Visibility:** Protected (JWT required · shop_owner role only)
 **Summary:** Update basic shop owner profile details. 
 
 ---
@@ -358,7 +358,7 @@ Prefix: `/delivery-partner`
 ### POST `/delivery-partner/onboard`
 
 **Visibility:** Protected (JWT required)
-**Summary:** Onboard authenticated user as a delivery partner. Grants the `delivery_driver` role.
+**Summary:** Onboard authenticated user as a delivery partner. Grants the `delivery_partner` role.
 
 **Request body**
 
@@ -378,14 +378,14 @@ Prefix: `/delivery-partner`
 
 ### GET `/delivery-partner/me`
 
-**Visibility:** Protected (JWT required · delivery_driver role only)
+**Visibility:** Protected (JWT required · delivery_partner role only)
 **Summary:** Get core partner profile (KYC status, stats, vehicle info).
 
 ---
 
 ### PATCH `/delivery-partner/me`
 
-**Visibility:** Protected (JWT required · delivery_driver role only)
+**Visibility:** Protected (JWT required · delivery_partner role only)
 **Summary:** Update partner profile. Attempting to change tracking data here will fail.
 
 ---

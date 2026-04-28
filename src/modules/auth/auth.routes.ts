@@ -16,6 +16,7 @@
 import { Elysia, t } from "elysia";
 import { jwtAuthPlugin } from "../../middleware/auth.middleware";
 import { rbacGuard, rbacPlugin } from "../../middleware/rbac.middleware";
+import { ROLES } from "../../shared";
 
 import {
   AuthController,
@@ -55,10 +56,7 @@ import {
   ResourceAuditParams,
 } from "./auth.schema";
 
-import {
-  PaginationQuerySchema,
-  parsePagination
-} from "../../shared/index";
+import { PaginationQuerySchema, parsePagination } from "../../shared/index";
 // ── Rate limit windows ────────────────────────────────────────────────────────
 
 const RL_WINDOW = env.RATE_LIMIT_WINDOW_MIN * 60;
@@ -68,8 +66,10 @@ const RL_COOLDOWN = env.RATE_LIMIT_COOLDOWN_SEC;
 // ── Shared TypeBox primitives ─────────────────────────────────────────────────
 // Schemas imported from auth.schema.ts
 
-
-import { authenticate, resolveRequestContext } from "../../shared/utils/request.utils";
+import {
+  authenticate,
+  resolveRequestContext,
+} from "../../shared/utils/request.utils";
 // ═════════════════════════════════════════════════════════════════════════════
 // PUBLIC ROUTES — No JWT Required
 // ═════════════════════════════════════════════════════════════════════════════
@@ -391,7 +391,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     "/",
     ({ actor, query }) => UserController.list(parsePagination(query), actor),
     {
-      beforeHandle: [rbacGuard(["admin"])],
+      beforeHandle: [rbacGuard([ROLES.ADMIN])],
       query: PaginationQuerySchema,
       detail: {
         summary: "List all users (admin)",
@@ -411,7 +411,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     "/:id",
     ({ actor, params }) => UserController.getById(params.id, actor),
     {
-      beforeHandle: [rbacGuard(["admin"])],
+      beforeHandle: [rbacGuard([ROLES.ADMIN])],
       params: UUIDParam,
       detail: {
         summary: "Get a user by ID",
@@ -438,7 +438,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     ({ actor, params, body, ip }) =>
       UserController.update(params.id, body, actor, { ip }),
     {
-      beforeHandle: [rbacGuard(["admin"])],
+      beforeHandle: [rbacGuard([ROLES.ADMIN])],
       params: UUIDParam,
       body: UpdateProfileBody,
       detail: {
@@ -453,7 +453,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     ({ actor, params, body, ip }) =>
       UserController.updateStatus(params.id, body.status, actor, { ip }),
     {
-      beforeHandle: [rbacGuard(["admin"])],
+      beforeHandle: [rbacGuard([ROLES.ADMIN])],
       params: UUIDParam,
       body: UpdateStatusBody,
       detail: {
@@ -479,7 +479,7 @@ export const userRoutes = new Elysia({ prefix: "/users", tags: ["Users"] })
     ({ actor, params, ip }) =>
       UserController.softDelete(params.id, actor, { ip }),
     {
-      beforeHandle: [rbacGuard(["admin"])],
+      beforeHandle: [rbacGuard([ROLES.ADMIN])],
       params: UUIDParam,
       detail: {
         summary: "Soft-delete a user account (admin)",
@@ -700,7 +700,7 @@ export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
   .derive(resolveRequestContext)
   .use(jwtAuthPlugin)
   .derive(authenticate)
-  .use(rbacPlugin(["admin"]))
+  .use(rbacPlugin([ROLES.ADMIN]))
 
   .get("/", ({ actor }) => RoleController.list(actor), {
     detail: {
@@ -762,9 +762,6 @@ export const roleRoutes = new Elysia({ prefix: "/roles", tags: ["Roles"] })
     },
   );
 
-
-  
-
 // ── 12. Audit routes (protected) ──────────────────────────────────────────────
 
 /**
@@ -798,7 +795,7 @@ export const auditRoutes = new Elysia({ prefix: "/audit", tags: ["Audit"] })
         actor,
       ),
     {
-      beforeHandle: [rbacGuard(["admin"])],
+      beforeHandle: [rbacGuard([ROLES.ADMIN])],
       params: ResourceAuditParams,
       query: PaginationQuerySchema,
       detail: {

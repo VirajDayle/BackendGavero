@@ -11,16 +11,19 @@ import {
   userRolesTable, 
   userTable 
 } from "../src/db/models/auth";
+import { ROLES } from "../src/shared";
 import { eq, inArray, notInArray, sql } from "drizzle-orm";
 
 async function main() {
   console.log("--- Seeding Roles & Fixing Assignments ---");
 
   const defaultRoles = [
-    { name: "Customer", slug: "customer", description: "Standard user / shooper", isSystem: true },
-    { name: "Shopkeeper", slug: "shopkeeper", description: "Merchant / Shop owner", isSystem: true },
-    { name: "Delivery Partner", slug: "delivery_partner", description: "Logistic partner / Rider", isSystem: true },
-    { name: "Admin", slug: "admin", description: "System administrator", isSystem: true },
+    { name: "Customer", slug: ROLES.CUSTOMER, description: "Standard user / shopper", isSystem: true },
+    { name: "Shop Owner", slug: ROLES.SHOP_OWNER, description: "Merchant / Shop owner", isSystem: true },
+    { name: "Delivery Partner", slug: ROLES.DELIVERY_PARTNER, description: "Logistic partner / Rider", isSystem: true },
+    { name: "Admin", slug: ROLES.ADMIN, description: "System administrator", isSystem: true },
+    { name: "Super Admin", slug: ROLES.SUPER_ADMIN, description: "Super administrator with full access", isSystem: true },
+    { name: "Employee", slug: ROLES.EMPLOYEE, description: "Internal operations personnel", isSystem: true },
   ];
 
   for (const dr of defaultRoles) {

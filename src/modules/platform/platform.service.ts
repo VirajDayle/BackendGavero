@@ -1,3 +1,15 @@
+/**
+ * platform.service.ts
+ *
+ * Service layer for the Platform module.
+ *
+ * This layer handles:
+ * - City management (listing, creating, updating, activation)
+ * - Serviceable H3 zone management (check, list, create, polyfill, sync)
+ * - Administrative auditing of platform changes
+ * - Geometric calculations (H3 → Polygon, Polygon → WKT)
+ */
+
 import {
   CityRepository,
   ServiceableH3ZoneRepository,
@@ -5,7 +17,6 @@ import {
 
 import {
   H3_RES_CITY,
-  h3ToBoundary,
   polyfill,
   coordsToH3,
   h3ToGeoJsonPolygon,
@@ -16,36 +27,44 @@ import { AuditLogRepository } from "../auth/auth.repository";
 import { PlatformErrors } from "./platform.errors";
 import { db } from "../../db";
 import type { DB } from "../../db/index";
-import {
-  type CityPublic,
-  type ServiceableH3ZonePublic,
-  type CreateCityBody,
-  type UpdateCityBody,
-  type CreateZoneBody,
-  type UpdateZoneBody,
-  type PolyfillZoneBody,
-  mapToZonePublic,
-  type CityMapItem,
+import type {
+  CityPublic,
+  ServiceableH3ZonePublic,
+  CityMapItem,
   ActiveFilter,
   CreateCity,
   UpdateCity,
+  CreateZoneBody,
+  UpdateZoneBody,
 } from "./platform.schema";
 
-import type { Pagination, PaginationQuery } from "../../shared";
+import { mapToZonePublic } from "./platform.schema";
+import type { Pagination } from "../../shared";
 import { Polygon } from "geojson";
 
-// ── Repo instances ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Type Definitions
+// ─────────────────────────────────────────────────────────────────────────────
 
+/** Collection of repositories required by the platform services */
 export interface PlatformRepositories {
   cityRepo: CityRepository;
   zoneRepo: ServiceableH3ZoneRepository;
   auditRepo: AuditLogRepository;
 }
 
-// ── Meta type ─────────────────────────────────────────────────────────────────
-
+/** Administrative metadata for auditing (actor, roles, ip) */
 type AdminMeta = { actorId: string; actorRoles: string[]; ip: string };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Geometric Utilities (Private)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Converts a GeoJSON Polygon into a PostGIS-compatible WKT string.
+ * @param geoJson - Source GeoJSON Polygon.
+ * @returns Well-Known Text (WKT) representation.
+ */
 function toBoundaryWktFromGeoJSON(geoJson: Polygon): string {
   if (geoJson.type !== "Polygon") {
     throw PlatformErrors.City.boundaryRequired();
@@ -62,9 +81,7 @@ function toBoundaryWktFromGeoJSON(geoJson: Polygon): string {
   const last = ring[ring.length - 1];
 
   const closedRing =
-    first[0] === last[0] && first[1] === last[1]
-      ? ring
-      : [...ring, first];
+    first[0] === last[0] && first[1] === last[1] ? ring : [...ring, first];
 
   // Convert to WKT (lng lat format is already correct in GeoJSON)
   const points = closedRing.map(([lng, lat]) => `${lng} ${lat}`);
@@ -72,41 +89,52 @@ function toBoundaryWktFromGeoJSON(geoJson: Polygon): string {
   return `SRID=4326;POLYGON((${points.join(", ")}))`;
 }
 
-// =============================================================================
-// 1. CityService
-// =============================================================================
+// ═════════════════════════════════════════════════════════════════════════════
+// 1. City Service
+// ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Service implementation for managing city metadata and operational status.
+ */
 export class CityServiceImpl {
   constructor(
     private readonly repos: PlatformRepositories,
     private readonly db: DB,
   ) { }
 
+  /**
+   * Lists all platform cities with pagination and optional state filtering.
+   */
   async list(
     pagination: Pagination,
     filter: ActiveFilter = "all",
     stateCode?: string,
   ): Promise<{ items: CityPublic[]; total: number }> {
-    const result = await this.repos.cityRepo.list(pagination,
-      { filter, stateCode }
-    );
-    return result;
+    return await this.repos.cityRepo.list(pagination, { filter, stateCode });
   }
 
+  /**
+   * Lists cities including their full GeoJSON boasync getById(id: string) {
+    const type = await this.typeRepo.findById(id);
+    if (!type) throw ShopErrors.Common.notFound("Shop type not found");
+    return type;
+  }undaries for map visualizations.
+   */
   async listWithBoundary(
     pagination: Pagination,
     filter: ActiveFilter = "all",
     stateCode?: string,
   ): Promise<{ items: CityMapItem[]; total: number }> {
-    const result = await this.repos.cityRepo.listWithBoundary(pagination,
-      { filter, stateCode }
-    );
-    return result;
+    return await this.repos.cityRepo.listWithBoundary(pagination, {
+      filter,
+      stateCode,
+    });
   }
 
-  async getByIdOrSlug(
-    idOrSlug: string,
-  ): Promise<CityPublic> {
+  /**
+   * Retrieves a city profile by its ID (UUID) or Slug.
+   */
+  async getByIdOrSlug(idOrSlug: string): Promise<CityPublic> {
     const isUuid =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
         idOrSlug,
@@ -119,6 +147,12 @@ export class CityServiceImpl {
     return city;
   }
 
+  /**
+   * Onboards a new city into the platform. This is an atomic operation that:
+   * 1. Creates the city record.
+   * 2. Auto-polyfills initial delivery zones.
+   * 3. Creates an audit log entry.
+   */
   async create(data: CreateCity, meta: AdminMeta): Promise<CityPublic> {
     const existing = await this.repos.cityRepo.findBySlug(
       data.slug.toLowerCase(),
@@ -128,14 +162,12 @@ export class CityServiceImpl {
     const boundaryWkt = toBoundaryWktFromGeoJSON(data.boundary);
 
     return await this.db.transaction(async (tx) => {
-      // Create local repositories wrapping the transaction
       const txCityRepo = new CityRepository(tx as unknown as typeof db);
       const txZoneRepo = new ServiceableH3ZoneRepository(
         tx as unknown as typeof db,
       );
       const txAuditRepo = new AuditLogRepository(tx as unknown as typeof db);
 
-      // Create a local set of repos for the transaction
       const txRepos: PlatformRepositories = {
         ...this.repos,
         cityRepo: txCityRepo,
@@ -143,13 +175,8 @@ export class CityServiceImpl {
         auditRepo: txAuditRepo,
       };
 
-      // Create the city using the tx-repo
-      const city = await txCityRepo.create({
-        ...data,
-        boundary: boundaryWkt,
-      });
+      const city = await txCityRepo.create({ ...data, boundary: boundaryWkt });
 
-      // Auto-polyfill using the transaction
       const txZoneService = new ServiceableZoneServiceImpl(txRepos);
       await txZoneService.polyfill(
         city.id,
@@ -158,7 +185,6 @@ export class CityServiceImpl {
         `${city.name} Auto-Zone`,
       );
 
-      // Audit log within the transaction
       await txAuditRepo.create({
         actorId: meta.actorId,
         actorIp: meta.ip,
@@ -172,12 +198,15 @@ export class CityServiceImpl {
     });
   }
 
+  /**
+   * Updates an existing city. If the boundary is changed, all auto-generated
+   * zones are re-polyfilled to match the new geometry.
+   */
   async update(
     id: string,
     data: UpdateCity,
     meta: AdminMeta,
   ): Promise<CityPublic> {
-
     const existing = await this.repos.cityRepo.findById(id);
     if (!existing) throw PlatformErrors.City.notFound();
 
@@ -207,7 +236,6 @@ export class CityServiceImpl {
       };
 
       const { boundary, ...rest } = data;
-
       const updated = await txCityRepo.update(id, {
         ...rest,
         ...(boundaryWkt ? { boundary: boundaryWkt } : {}),
@@ -215,7 +243,6 @@ export class CityServiceImpl {
 
       if (!updated) throw PlatformErrors.City.notFound();
 
-      // If boundary is updated, sync zones
       if (data.boundary) {
         const txZoneService = new ServiceableZoneServiceImpl(txRepos);
         await txZoneService.syncZonesWithBoundary(id, data.boundary, meta);
@@ -235,12 +262,14 @@ export class CityServiceImpl {
     });
   }
 
+  /**
+   * Toggles the operational status of a city.
+   */
   async setActive(
     id: string,
     isActive: boolean,
     meta: AdminMeta,
   ): Promise<CityPublic> {
-
     return await this.db.transaction(async (tx) => {
       const txCityRepo = new CityRepository(tx as unknown as typeof db);
       const txZoneRepo = new ServiceableH3ZoneRepository(
@@ -254,7 +283,6 @@ export class CityServiceImpl {
         zoneRepo: txZoneRepo,
         auditRepo: txAuditRepo,
       };
-
       const updated = await txCityRepo.setActive(id, isActive);
       if (!updated) throw PlatformErrors.City.notFound();
 
@@ -274,25 +302,46 @@ export class CityServiceImpl {
   }
 }
 
-// =============================================================================
-// 2. ServiceableZoneService (H3)
-// =============================================================================
+// ═════════════════════════════════════════════════════════════════════════════
+// 2. Serviceable Zone Service (H3)
+// ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Service implementation for managing delivery serviceability using Uber's H3 grid.
+ */
 export class ServiceableZoneServiceImpl {
   constructor(private readonly repos: PlatformRepositories) { }
 
-  async checkServiceability(lat: number, lng: number) {
+  /**
+   * Determines if provided coordinates sit within any active serviceable cell.
+   */
+  async checkServiceability(lat: number, lng: number): Promise<
+    | { serviceable: true; cityId: string; h3Index: string; label: string | null }
+    | { serviceable: false; cityId: null; h3Index: string; label: null }
+  > {
     const h3Index = coordsToH3(lat, lng, H3_RES_CITY);
     const match = await this.repos.zoneRepo.findByH3Index(h3Index);
 
+    if (!match) {
+      return {
+        serviceable: false,
+        h3Index,
+        cityId: null,
+        label: null,
+      }
+    }
+
     return {
-      serviceable: !!match,
+      serviceable: true,
       h3Index,
-      cityId: match?.cityId ?? null,
-      label: match?.label ?? null,
+      cityId: match.cityId,
+      label: match.label,
     };
   }
 
+  /**
+   * Lists all H3 zones for a city with pagination and GeoJSON geometry derived from indices.
+   */
   async listByCity(
     cityId: string,
     pagination: Pagination,
@@ -312,11 +361,14 @@ export class ServiceableZoneServiceImpl {
     };
   }
 
+
+  /**
+   * Manually creates a new H3 serviceable zone.
+   */
   async create(
     data: CreateZoneBody,
     meta: AdminMeta,
   ): Promise<ServiceableH3ZonePublic> {
-
     const city = await this.repos.cityRepo.findById(data.cityId);
     if (!city) throw PlatformErrors.City.notFound();
 
@@ -337,12 +389,14 @@ export class ServiceableZoneServiceImpl {
     });
   }
 
+  /**
+   * Updates metadata for an H3 zone.
+   */
   async update(
     id: string,
     data: UpdateZoneBody,
     meta: AdminMeta,
   ): Promise<ServiceableH3ZonePublic> {
-
     const updated = await this.repos.zoneRepo.update(id, data as any);
     if (!updated) throw PlatformErrors.Zone.notFound();
 
@@ -354,15 +408,20 @@ export class ServiceableZoneServiceImpl {
       resourceId: id,
     });
 
-    return mapToZonePublic({ ...updated, boundary: h3ToGeoJsonPolygon(updated.h3Index) });
+    return mapToZonePublic({
+      ...updated,
+      boundary: h3ToGeoJsonPolygon(updated.h3Index),
+    });
   }
 
+  /**
+   * Toggles the operational status of a single H3 zone.
+   */
   async setActive(
     id: string,
     isActive: boolean,
     meta: AdminMeta,
   ): Promise<ServiceableH3ZonePublic> {
-
     const updated = await this.repos.zoneRepo.setActive(id, isActive);
     if (!updated) throw PlatformErrors.Zone.notFound();
 
@@ -374,9 +433,15 @@ export class ServiceableZoneServiceImpl {
       resourceId: id,
     });
 
-    return mapToZonePublic({ ...updated, boundary: h3ToGeoJsonPolygon(updated.h3Index) });
+    return mapToZonePublic({
+      ...updated,
+      boundary: h3ToGeoJsonPolygon(updated.h3Index),
+    });
   }
 
+  /**
+   * Bulk toggles the operational status of all zones within a city.
+   */
   async setActiveByCity(cityId: string, isActive: boolean, meta: AdminMeta) {
     await this.repos.zoneRepo.setActiveByCity(cityId, isActive);
 
@@ -389,22 +454,20 @@ export class ServiceableZoneServiceImpl {
     });
   }
 
+  /**
+   * Fills a city's boundary polygon with H3 index Resolution 7 cells.
+   */
   async polyfill(
     cityId: string,
     boundary: Polygon,
     meta: AdminMeta,
     label?: string,
   ) {
-
     const city = await this.repos.cityRepo.findById(cityId);
     if (!city) throw PlatformErrors.City.notFound();
 
     const h3Indexes = polyfill(boundary, H3_RES_CITY);
-    const data = h3Indexes.map((idx) => ({
-      h3Index: idx,
-      cityId,
-      label,
-    }));
+    const data = h3Indexes.map((idx) => ({ h3Index: idx, cityId, label }));
 
     await this.repos.zoneRepo.bulkCreate(data);
 
@@ -420,145 +483,33 @@ export class ServiceableZoneServiceImpl {
     return { count: h3Indexes.length };
   }
 
+  /**
+   * Synchronizes city zones with a new boundary by deleting old auto-zones and re-polyfilling.
+   */
   async syncZonesWithBoundary(
     cityId: string,
     boundary: Polygon,
     meta: AdminMeta,
   ) {
-
     const city = await this.repos.cityRepo.findById(cityId);
     if (!city) throw PlatformErrors.City.notFound();
 
-    // 1. Delete old auto-zones
-    // We use a pattern match to avoid touching manually added zones
+    // 1. Delete old auto-zones via pattern match
     await this.repos.zoneRepo.deleteZonesByCityAndLabelPattern(
       cityId,
       "%Auto-Zone",
     );
 
-    // 2. Re-polyfill new ones
+    // 2. Re-polyfill using the new boundary
     await this.polyfill(cityId, boundary, meta, `${city.name} Auto-Zone`);
   }
 }
 
-// // =============================================================================
-// // 3. PincodeService
-// // =============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+// Default Instances / Exports
+// ─────────────────────────────────────────────────────────────────────────────
 
-// export class PincodeServiceImpl {
-//   constructor(private readonly repos: PlatformRepositories) { }
-
-//   async create(
-//     data: CreatePincodeBody,
-//     meta: AdminMeta,
-//   ): Promise<ServiceablePincodePublic> {
-
-//     const city = await this.repos.cityRepo.findById(data.cityId);
-//     if (!city) throw PlatformErrors.City.notFound();
-
-//     const existing = await this.repos.pincodeRepo.findByPincode(data.pincode);
-//     if (existing) throw PlatformErrors.Pincode.conflict(data.pincode);
-
-//     const pincode = await this.repos.pincodeRepo.create(data);
-
-//     await this.repos.auditRepo.create({
-//       actorId: meta.actorId,
-//       actorIp: meta.ip,
-//       action: "pincode.created",
-//       resource: "serviceable_pincode",
-//       resourceId: pincode.id,
-//       after: { pincode: pincode.pincode, cityId: city.id },
-//     });
-
-//     return mapToPincodePublic(pincode);
-//   }
-
-//   async update(
-//     id: string,
-//     data: UpdatePincodeBody,
-//     meta: AdminMeta,
-//   ): Promise<ServiceablePincodePublic> {
-
-//     const updated = await this.repos.pincodeRepo.update(id, data as any);
-//     if (!updated) throw PlatformErrors.Pincode.notFound();
-
-//     await this.repos.auditRepo.create({
-//       actorId: meta.actorId,
-//       actorIp: meta.ip,
-//       action: "pincode.updated",
-//       resource: "serviceable_pincode",
-//       resourceId: id,
-//     });
-
-//     return mapToPincodePublic(updated);
-//   }
-
-//   async setActive(
-//     id: string,
-//     isActive: boolean,
-//     meta: AdminMeta,
-//   ): Promise<ServiceablePincodePublic> {
-
-//     const updated = await this.repos.pincodeRepo.setActive(id, isActive);
-//     if (!updated) throw PlatformErrors.Pincode.notFound();
-
-//     await this.repos.auditRepo.create({
-//       actorId: meta.actorId,
-//       actorIp: meta.ip,
-//       action: isActive ? "pincode.activated" : "pincode.deactivated",
-//       resource: "serviceable_pincode",
-//       resourceId: id,
-//     });
-
-//     return mapToPincodePublic(updated);
-//   }
-
-//   async list(
-//     pagination: Pagination,
-//     filter: ActiveFilter = "all",
-//   ): Promise<{ items: ServiceablePincodePublic[]; total: number }> {
-//     const result = await this.repos.pincodeRepo.list(pagination, { filter });
-//     return {
-//       ...result,
-//       items: result.items.map(mapToPincodePublic),
-//     };
-//   }
-
-//   async listByCity(
-//     cityId: string,
-//     pagination: Pagination,
-//     activeOnly: boolean = true,
-//   ): Promise<{ items: ServiceablePincodePublic[]; total: number }> {
-//     const result = await this.repos.pincodeRepo.listByCity(cityId, pagination, {
-//       activeOnly,
-//     });
-//     return {
-//       ...result,
-//       items: result.items.map(mapToPincodePublic),
-//     };
-//   }
-
-//   async checkServiceability(check: ServiceabilityCheck) {
-//     if (check.type === "coordinates") {
-//       return ServiceableZoneService.checkServiceability(
-//         check.latitude,
-//         check.longitude,
-//       );
-//     }
-
-//     const match = await this.repos.pincodeRepo.findActiveByPincode(
-//       check.pincode,
-//     );
-//     return {
-//       serviceable: !!match,
-//       pincode: match?.pincode ?? null,
-//       localityName: match?.localityName ?? null,
-//     };
-//   }
-// }
-
-// ── Export default instances ───────────────────────────────────────────────────
-
+/** Default repository set using primary database connection */
 export const defaultRepos: PlatformRepositories = {
   cityRepo: new CityRepository(db),
   zoneRepo: new ServiceableH3ZoneRepository(db),
@@ -569,4 +520,3 @@ export const CityService = new CityServiceImpl(defaultRepos, db);
 export const ServiceableZoneService = new ServiceableZoneServiceImpl(
   defaultRepos,
 );
-

@@ -420,4 +420,29 @@ export const userWithRolesSchema = userPublicSchema.extend({
   ),
 });
 
+
+export const verifyDigilockerAccountSchema = z
+  .object({
+    verificationId: z
+      .string()
+      .min(1)
+      .max(50)
+      .regex(/^[a-zA-Z0-9._\-]+$/, "Invalid verification ID"),
+    mobileNumber: z.string().min(5).max(15).optional(),
+    aadhaarNumber: z
+      .string()
+      .length(12)
+      .regex(/^\d{12}$/, "Must be 12 digits")
+      .optional(),
+  })
+  .refine(
+    (d) => d.mobileNumber !== undefined || d.aadhaarNumber !== undefined,
+    {
+      message: "Either mobileNumber or aadhaarNumber is required",
+      path: ["mobileNumber"],
+    },
+  );
+
+export type VerifyDigilockerAccount = z.infer<typeof verifyDigilockerAccountSchema>;
+
 export type UserWithRoles = z.infer<typeof userWithRolesSchema>;

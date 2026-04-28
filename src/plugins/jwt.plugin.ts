@@ -16,14 +16,10 @@ import { env } from "../config/env";
 const ACCESS_SECRET = new TextEncoder().encode(env.JWT_SECRET);
 
 export interface JwtPayload {
-  sub: string; // userId
-  jti: string; // accessTokenJti
-  roles: string[];
-}
-
-export interface SignedToken {
-  token: string;
-  expiresAt: Date;
+  sub: string;
+  jti: string;
+  sid: string;
+  roleIds: string[];
 }
 
 const jwtHelpers = {
@@ -31,21 +27,14 @@ const jwtHelpers = {
    * Signs an access token JWT.
    * Returns both the token string and the expiry Date.
    */
-  async sign(payload: JwtPayload): Promise<SignedToken> {
-    const ttlMin = env.JWT_ACCESS_TTL_MIN;
-    const expiresAt = new Date(Date.now() + ttlMin * 60 * 1000);
-
-    const token = await new SignJWT({
-      sub: payload.sub,
-      roles: payload.roles,
-    })
+  async sign(payload: JwtPayload): Promise<string> {
+    return new SignJWT({ roles: payload.roleIds, sid: payload.sid })
       .setProtectedHeader({ alg: "HS256" })
+      .setSubject(payload.sub)
       .setJti(payload.jti)
       .setIssuedAt()
-      .setExpirationTime(`${ttlMin}m`)
+      .setExpirationTime(`${env.JWT_ACCESS_TTL_MIN ?? 15}m`)
       .sign(ACCESS_SECRET);
-
-    return { token, expiresAt };
   },
 
   /**
@@ -57,7 +46,7 @@ const jwtHelpers = {
     return {
       sub: payload.sub as string,
       jti: payload.jti as string,
-      roles: (payload["roles"] as string[]) ?? [],
+      roleIds: (payload["roleIds"] as string[]) ?? [],
     };
   },
 };
